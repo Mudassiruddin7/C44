@@ -46,11 +46,13 @@ def run(stage: str, n_scenes: int | None = None):
         print("\n".join(_check_access()))
         return None
     if stage == "setup":
-        setup_env.ensure_nvcc()
-        setup_env.install_gsplat()
+        # independent installs first, so one failure doesn't block the rest
+        setup_env.install_base()
         setup_env.install_vggt()
         setup_env.install_npr()
         setup_env.install_flashworld()
+        setup_env.ensure_nvcc()
+        setup_env.install_gsplat()
         print("SETUP DONE")
         return setup_env.report()
     if stage in ("pilot", "full"):

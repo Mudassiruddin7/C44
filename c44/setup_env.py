@@ -185,10 +185,37 @@ def ensure_nvcc(min_version: tuple[int, int] = (12, 8), allow_runfile: bool = Tr
 
 
 # ----------------------------------------------------------------------------- gsplat
+def _cccl_include_dirs() -> list[str]:
+    """Directories that contain <nv/target> (CUDA 13 moved CCCL headers into include/cccl)."""
+    import glob
+    import site
+    roots = [os.environ.get("CUDA_HOME", ""), "/usr/local/cuda", *site.getsitepackages(), sys.prefix]
+    found = []
+    for r in roots:
+        if not r:
+            continue
+        for hit in glob.glob(os.path.join(r, "**", "nv", "target"), recursive=True):
+            d = os.path.dirname(os.path.dirname(hit))
+            if d not in found:
+                found.append(d)
+    return found
+
+
+def install_base() -> None:
+    """Small pure-python deps the pipeline needs (never touches torch)."""
+    pip_install("av", "imageio-ffmpeg", "plyfile", "scipy", "scikit-learn", "pandas", "huggingface_hub", "einops", "safetensors")
+
+
 def install_gsplat() -> None:
     env = {"TORCH_CUDA_ARCH_LIST": gpu_arch(), "MAX_JOBS": str(max(2, (os.cpu_count() or 4)))}
+    inc = _cccl_include_dirs()
+    if inc:
+        print("CCCL headers:", inc)
+        for var in ("CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH"):
+            env[var] = ":".join(inc + [os.environ.get(var, "")]).rstrip(":")
     os.environ.update(env)
-    pip_install(f"gsplat=={config.GSPLAT_VERSION}", "ninja", "jaxtyping", "rich", env=env)
+    pip_install("ninja", "jaxtyping", "rich", env=env)
+    pip_install("--no-deps", f"gsplat=={config.GSPLAT_VERSION}", env=env)   # --no-deps: keep molab's torch
     smoke_test_gsplat()
 
 
@@ -235,7 +262,7 @@ def code_dir() -> Path:
 def install_flashworld() -> Path:
     repo = fetch_repo(config.FLASHWORLD_REPO, config.FLASHWORLD_COMMIT, code_dir() / "FlashWorld")
     pip_install("omegaconf", "jaxtyping", "rich", "einops", "moviepy==1.0.3", "av", "plyfile", "ftfy", "accelerate",
-                "nanobind", "gradio", "fastapi", "uvicorn", "imageio", "imageio-ffmpeg", "triton",
+                "nanobind", "gradio", "fastapi", "uvicorn", "imageio", "imageio-ffmpeg",
                 "transformers>=4.57", config.FLASHWORLD_DIFFUSERS)
     from huggingface_hub import hf_hub_download
     hf_hub_download("imlixinyang/FlashWorld", "model.ckpt")
@@ -243,7 +270,7 @@ def install_flashworld() -> Path:
 
 
 def install_vggt() -> None:
-    pip_install(config.VGGT_PIP)
+    pip_install("--no-deps", config.VGGT_PIP)   # keep molab's torch; vggt only needs torch/numpy/pillow/hf_hub
 
 
 def install_npr() -> Path:
