@@ -42,6 +42,7 @@ def _build(n: int, store: Store) -> "object":
 def run(stage: str, n_scenes: int | None = None):
     store = Store()
     if stage == "check":
+        print("c44 code version: v5-cccl-fix")
         print("\n".join(f"{k}: {v}" for k, v in setup_env.report().items()))
         print("\n".join(_check_access()))
         return None

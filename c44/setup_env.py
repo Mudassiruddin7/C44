@@ -13,6 +13,7 @@ FlashWorld pins torch 2.6, which cannot run on Blackwell; we keep molab's torch 
 from __future__ import annotations
 
 import io
+import glob
 import os
 import platform
 import re
@@ -220,6 +221,9 @@ def install_gsplat() -> None:
         for var in ("CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH"):
             env[var] = ":".join(inc + [os.environ.get(var, "")]).rstrip(":")
     os.environ.update(env)
+    # a failed earlier build leaves a stale ninja state that makes torch skip the build and look for a missing .so
+    for d in glob.glob(str(Path.home() / ".cache" / "torch_extensions" / "*" / "gsplat_cuda")):
+        shutil.rmtree(d, ignore_errors=True)
     pip_install("ninja", "jaxtyping", "rich", env=env)
     pip_install("--no-deps", f"gsplat=={config.GSPLAT_VERSION}", env=env)   # --no-deps: keep molab's torch
     smoke_test_gsplat()
