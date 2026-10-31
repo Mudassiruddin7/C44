@@ -1,0 +1,28 @@
+[project]
+name = "c44"
+version = "0.1.0"
+description = "W2V benchmark: videos rendered from generated 3D worlds vs. video forensics (CVPR 2027 idea C44)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "scikit-learn",
+    "opencv-python-headless",
+    "av",
+    "imageio-ffmpeg",
+    "pillow",
+    "plyfile",
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+# GPU stack, installed on molab by c44.setup_env (pinned there, see README)
+gpu = ["torch", "transformers", "gsplat"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["c44*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
