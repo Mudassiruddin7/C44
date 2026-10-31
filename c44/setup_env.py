@@ -148,10 +148,47 @@ def _activate_cuda_home(home: Path) -> None:
     os.environ["CUDA_HOME"] = str(home)
     os.environ["PATH"] = f"{home / 'bin'}:{os.environ.get('PATH', '')}"
     os.environ["LD_LIBRARY_PATH"] = f"{home / 'lib64'}:{os.environ.get('LD_LIBRARY_PATH', '')}"
+    ext = sys.modules.get("torch.utils.cpp_extension")   # caches CUDA_HOME at import time
+    if ext is not None:
+        ext.CUDA_HOME = str(home)
+
+
+def _matched_toolkit(cuda: str) -> Path:
+    """nvcc + runtime headers + CCCL all at torch's CUDA minor version, installed into one private folder.
+    molab ships nvcc 13.3 next to CUDA 13.0 headers; CCCL refuses that mix ("compiler and toolkit headers are
+    incompatible"), so we build with a self-consistent toolkit matching torch instead."""
+    dst = Path.home() / ".c44" / f"cuda{cuda}"
+    hits = glob.glob(str(dst / "**" / "bin" / "nvcc"), recursive=True)
+    if not hits:
+        args = [f"nvidia-cuda-nvcc=={cuda}.*", f"nvidia-cuda-runtime=={cuda}.*", f"nvidia-cuda-cccl=={cuda}.*",
+                f"nvidia-cuda-crt=={cuda}.*", f"nvidia-nvvm=={cuda}.*"]
+        tool = ["uv", "pip", "install", "--python", sys.executable] if shutil.which("uv") else [sys.executable, "-m", "pip", "install"]
+        try:
+            run([*tool, "--target", str(dst), *args])
+        except Exception:                        # noqa: BLE001 - crt/nvvm may not be separate wheels
+            run([*tool, "--target", str(dst), *args[:3]])
+        hits = glob.glob(str(dst / "**" / "bin" / "nvcc"), recursive=True)
+    if not hits:
+        raise RuntimeError(f"could not install a CUDA {cuda} nvcc")
+    home = Path(hits[0]).parent.parent
+    if not (home / "lib64").exists() and (home / "lib").exists():
+        (home / "lib64").symlink_to(home / "lib", target_is_directory=True)
+    so = sorted((home / "lib").glob("libcudart.so.*")) if (home / "lib").exists() else []
+    if so and not (home / "lib" / "libcudart.so").exists():
+        (home / "lib" / "libcudart.so").symlink_to(so[0])
+    return home
 
 
 def ensure_nvcc(min_version: tuple[int, int] = (12, 8), allow_runfile: bool = True) -> str:
     nvcc, ver = find_nvcc()
+    import torch
+    tcuda = torch.version.cuda or ""
+    if tcuda.startswith("13") and (not nvcc or f"{ver[0]}.{ver[1]}" != tcuda):
+        home = _matched_toolkit(tcuda)
+        _activate_cuda_home(home)
+        nvcc, ver = find_nvcc()
+        print(f"using CUDA {tcuda} toolkit matched to torch: nvcc {ver} at {home}")
+        return str(home)
     if nvcc and ver >= min_version:
         _activate_cuda_home(Path(nvcc).resolve().parent.parent)
         print(f"nvcc {ver} found at {nvcc}")
@@ -190,7 +227,9 @@ def _cccl_include_dirs() -> list[str]:
     """Directories that contain <nv/target> (CUDA 13 moved CCCL headers into include/cccl)."""
     import glob
     import site
-    roots = [os.environ.get("CUDA_HOME", ""), "/usr/local/cuda", *site.getsitepackages(), sys.prefix]
+    roots = [os.environ.get("CUDA_HOME", "")]   # only the active toolkit: mixing versions breaks CCCL
+    if not roots[0]:
+        roots = ["/usr/local/cuda", *site.getsitepackages(), sys.prefix]
     found = []
     for r in roots:
         if not r:
@@ -211,8 +250,7 @@ def install_gsplat() -> None:
     env = {"TORCH_CUDA_ARCH_LIST": gpu_arch(), "MAX_JOBS": str(max(2, (os.cpu_count() or 4)))}
     inc = _cccl_include_dirs()
     if not inc:   # CUDA 13 wheel layout lacks <nv/target>; fetch CCCL headers only
-        pip_install("--no-deps", "nvidia-cuda-cccl")
-        inc = _cccl_include_dirs()
+        raise RuntimeError(f"no CCCL headers under CUDA_HOME={os.environ.get('CUDA_HOME')}")
     if not inc:
         raise RuntimeError("CCCL headers (<nv/target>) not found even after installing nvidia-cuda-cccl")
     if inc:
