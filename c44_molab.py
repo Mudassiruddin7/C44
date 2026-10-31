@@ -17,11 +17,16 @@ def _():
     N_SCENES = 6  # pilot. Set 150 for the full benchmark (6-9 h).
 
     # Downloads the C44 code from GitHub (once per session) and makes it importable.
+    import shutil
+    import time
     _dst = os.path.abspath("C44")
-    if not os.path.exists(_dst):
-        _data = urllib.request.urlopen("https://codeload.github.com/Mudassiruddin7/C44/zip/main").read()
-        zipfile.ZipFile(io.BytesIO(_data)).extractall(".")
-        os.rename("C44-main", _dst)
+    shutil.rmtree(_dst, ignore_errors=True)       # always fetch the latest code
+    shutil.rmtree("C44-main", ignore_errors=True)
+    _data = urllib.request.urlopen(f"https://codeload.github.com/Mudassiruddin7/C44/zip/main?t={time.time()}").read()
+    zipfile.ZipFile(io.BytesIO(_data)).extractall(".")
+    os.rename("C44-main", _dst)
+    for _m in [m for m in sys.modules if m == "c44" or m.startswith("c44.")]:
+        del sys.modules[_m]                        # drop stale code already imported in this kernel
     if _dst not in sys.path:
         sys.path.insert(0, _dst)
     from c44 import molab
