@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import traceback
 import zlib
 from pathlib import Path
 from typing import Callable
@@ -52,6 +53,17 @@ def _flush(store: Store | None, extra: list[Path] = (), msg: str = "c44") -> Non
 
 def _finished(cell: str, key: str = "scene") -> set[str]:
     return {getattr(c, key) for c in manifest().load().values() if c.cell == cell and c.status in ("ok", "qc_fail")}
+
+
+def _where(e: BaseException) -> str:
+    tb = traceback.extract_tb(e.__traceback__)
+    return f"{Path(tb[-1].filename).name}:{tb[-1].lineno} in {tb[-1].name}" if tb else ""
+
+
+def _why(e: BaseException) -> str:
+    """repr + innermost frame + last traceback lines, for the log."""
+    tail = " | ".join(traceback.format_exc().strip().splitlines()[-6:])
+    return f"{e!r} @ {_where(e)} :: {tail}"
 
 
 def _fail(cell: str, cid: str, scene: str, status: str, parent: str = "", **meta) -> None:
@@ -105,8 +117,8 @@ def build_rc(n: int, seed: int = 0, store: Store | None = None, log: Log = print
             made.append(cid)
             log(f"[RC] {len(made)} done, scene {k + 1}/{len(scenes)}: {cid}")
         except Exception as e:                    # noqa: BLE001 - keep building, record the error, retry later
-            log(f"[RC] {scene[:12]} failed: {e!r}")
-            _fail("RC", cid, scene, "error", error=repr(e))
+            log(f"[RC] {scene[:12]} failed: {_why(e)}")
+            _fail("RC", cid, scene, "error", error=f"{e!r} @ {_where(e)}")
         finally:
             if vpath is not None and not keep_video and Path(vpath).exists():
                 Path(vpath).unlink()
@@ -165,8 +177,8 @@ def build_gr(fw, seed: int = 0, store: Store | None = None, log: Log = print, ge
             made.append(cid)
             log(f"[GR] {i + 1}/{len(todo)} {cid} coverage={cov:.3f} gen={secs:.1f}s")
         except Exception as e:                    # noqa: BLE001
-            log(f"[GR] {rc.clip_id} failed: {e!r}")
-            _fail("GR", cid, rc.scene, "error", parent=rc.clip_id, error=repr(e))
+            log(f"[GR] {rc.clip_id} failed: {_why(e)}")
+            _fail("GR", cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
         if made and len(made) % batch == 0:
             _flush(store, msg=f"c44: GR x{len(made)}")
     _flush(store, msg="c44: GR")
@@ -212,8 +224,8 @@ def build_rr(seed: int = 0, store: Store | None = None, log: Log = print, geo=No
             made.append(cid)
             log(f"[RR] {i + 1}/{len(todo)} {cid} coverage={cov:.3f}")
         except Exception as e:                    # noqa: BLE001
-            log(f"[RR] {rc.clip_id} failed: {e!r}")
-            _fail("RR", cid, rc.scene, "error", parent=rc.clip_id, error=repr(e))
+            log(f"[RR] {rc.clip_id} failed: {_why(e)}")
+            _fail("RR", cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
         finally:
             if not keep_gs:
                 shutil.rmtree(gs_dir, ignore_errors=True)
@@ -244,8 +256,8 @@ def build_gv(gen, seed: int = 0, store: Store | None = None, log: Log = print, g
             made.append(cid)
             log(f"[GV] {i + 1}/{len(todo)} {cid}")
         except Exception as e:                    # noqa: BLE001
-            log(f"[GV] {rc.clip_id} failed: {e!r}")
-            _fail("GV", cid, rc.scene, "error", parent=rc.clip_id, error=repr(e))
+            log(f"[GV] {rc.clip_id} failed: {_why(e)}")
+            _fail("GV", cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
         if made and len(made) % batch == 0:
             _flush(store, msg=f"c44: GV x{len(made)}")
     _flush(store, msg="c44: GV")

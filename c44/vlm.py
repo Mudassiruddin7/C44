@@ -18,8 +18,11 @@ class VLM:
         import torch
         from transformers import AutoModelForImageTextToText, AutoProcessor
         self.proc = AutoProcessor.from_pretrained(model_id)
-        self.model = AutoModelForImageTextToText.from_pretrained(model_id, torch_dtype=torch.bfloat16,
-                                                                 device_map=device).eval()
+        try:
+            m = AutoModelForImageTextToText.from_pretrained(model_id, dtype=torch.bfloat16)
+        except TypeError:                          # older transformers
+            m = AutoModelForImageTextToText.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+        self.model = m.to(device).eval()           # plain .to(): no `accelerate` needed
         self.model_id = model_id
 
     def ask(self, images: list[np.ndarray], prompt: str, max_new_tokens: int = 128) -> str:

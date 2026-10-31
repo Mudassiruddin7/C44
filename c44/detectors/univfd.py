@@ -21,7 +21,7 @@ class UnivFD(Detector):
         self.torch, self.device, self.n = torch, device, n_frames
         mid = "openai/clip-vit-large-patch14"
         self.proc = CLIPImageProcessor.from_pretrained(mid)
-        self.model = CLIPVisionModelWithProjection.from_pretrained(mid, torch_dtype=torch.float16).to(device).eval()
+        self.model = CLIPVisionModelWithProjection.from_pretrained(mid, dtype=torch.float16).to(device).eval()
         sd = torch.hub.load_state_dict_from_url(config.UNIVFD_FC_URL, map_location="cpu", file_name="univfd_fc.pth")
         self.fc = torch.nn.Linear(768, 1)
         self.fc.load_state_dict(sd)
