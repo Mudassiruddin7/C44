@@ -259,6 +259,27 @@ def code_dir() -> Path:
     return p
 
 
+def remove_shadow_torch() -> None:
+    """Drop torch/triton/nvidia-* that dependency resolution installed into this venv when the system
+    (molab) torch lives elsewhere; a venv copy would shadow the working CUDA build after a restart."""
+    import site
+    venv_sp = [p for p in site.getsitepackages() if p.startswith(sys.prefix)]
+    if not venv_sp or not any((Path(p) / "torch").exists() for p in venv_sp):
+        return
+    out = subprocess.run(["uv", "pip", "list", "--python", sys.executable], capture_output=True, text=True).stdout
+    pkgs = [l.split()[0] for l in out.splitlines()[2:]
+            if l.split() and (l.split()[0] in ("torch", "triton", "torchvision") or l.split()[0].startswith("nvidia-"))]
+    if pkgs and shutil.which("uv"):
+        run(["uv", "pip", "uninstall", "--python", sys.executable, *pkgs], check=False)
+
+
+def require_gpu() -> None:
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError("No GPU in this session. In molab, open the notebook specs (header button), attach the "
+                           "RTX PRO 6000 GPU, restart, and run again.")
+
+
 def install_flashworld() -> Path:
     repo = fetch_repo(config.FLASHWORLD_REPO, config.FLASHWORLD_COMMIT, code_dir() / "FlashWorld")
     pip_install("omegaconf", "jaxtyping", "rich", "einops", "moviepy==1.0.3", "av", "plyfile", "ftfy", "accelerate",
