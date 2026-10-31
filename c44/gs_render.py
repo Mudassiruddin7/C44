@@ -47,10 +47,11 @@ def render(gs: dict, c2w_cv: np.ndarray, K: np.ndarray, width: int, height: int,
     with torch.no_grad():
         for i in range(0, T, chunk):
             vm, kk = viewmats[i:i + chunk], Ks[i:i + chunk]
-            bg = torch.tensor(background, dtype=torch.float32, device=dev).expand(len(vm), 3)
+            bg = torch.tensor(background, dtype=torch.float32, device=dev)
             rgb, alpha, _ = rasterization(gs["means"], gs["quats"], gs["scales"], gs["opacities"], gs["colors"],
                                           vm, kk, width, height, sh_degree=gs["sh_degree"], near_plane=near,
-                                          far_plane=far, backgrounds=bg, render_mode="RGB", rasterize_mode="classic")
+                                          far_plane=far, render_mode="RGB", rasterize_mode="classic")
+            rgb = rgb + (1.0 - alpha) * bg      # composite manually: gsplat's backgrounds shape check varies by version
             frames.append((rgb.clamp(0, 1) * 255 + 0.5).to(torch.uint8).cpu())
             a = alpha[..., 0]
             cov.append(a.mean(dim=(1, 2)).cpu())
