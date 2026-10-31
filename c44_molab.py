@@ -14,8 +14,6 @@ def _():
 
     import marimo as mo
 
-    N_SCENES = 6  # pilot. Set 150 for the full benchmark (6-9 h).
-
     # Downloads the C44 code from GitHub (once per session) and makes it importable.
     import shutil
     import time
@@ -31,33 +29,57 @@ def _():
         sys.path.insert(0, _dst)
     from c44 import molab
 
-    return N_SCENES, mo, molab, os
+    return mo, molab, os
 
 
 @app.cell
 def _(mo):
-    token_box = mo.ui.text(kind="password", label="Paste your Hugging Face token (hf_...) and press Enter",
-                           full_width=True)
-    token_box
-    return (token_box,)
+    form = (
+        mo.md(
+            """
+            **Hugging Face token** (hf_...) {token}
+
+            **Scenes** (6 = pilot, 150 = full run) {n}
+
+            **Optional: private HF dataset repo to keep results if molab restarts** (`yourname/c44-w2v`, the token
+            needs write access; leave empty to just download the zip at the end) {repo}
+            """
+        )
+        .batch(
+            token=mo.ui.text(kind="password", full_width=True),
+            n=mo.ui.number(1, 400, value=6, step=1),
+            repo=mo.ui.text(full_width=True),
+        )
+        .form(submit_button_label="Start the whole pipeline", clear_on_submit=False)
+    )
+    form
+    return (form,)
 
 
 @app.cell
-def _(N_SCENES, mo, molab, os, token_box):
-    # Runs the whole pipeline automatically as soon as a token is present: check -> setup -> build -> evaluate.
-    mo.stop(not token_box.value.strip(), mo.md("Waiting for the token above. Everything runs automatically after."))
-    os.environ["HF_TOKEN"] = token_box.value.strip()
-    print("=== 1/4 check ===")
+def _(form, mo, molab, os):
+    # Runs everything automatically after the button: check -> setup -> smoke test -> build -> evaluate -> robustness.
+    mo.stop(form.value is None, mo.md("Fill in the token and press **Start the whole pipeline**."))
+    _v = form.value
+    mo.stop(not _v["token"].strip(), mo.md("**The token is empty.** Paste it and press Start again."))
+    os.environ["HF_TOKEN"] = _v["token"].strip()
+    if _v["repo"].strip():
+        os.environ["C44_HF_REPO"] = _v["repo"].strip()
+    _n = int(_v["n"])
+    print("=== 1/5 check ===")
     molab.run("check")
-    print("=== 2/4 setup (20-45 min) ===")
+    print("=== 2/5 setup (about 10 min) ===")
     molab.run("setup")
-    print(f"=== 3/4 build {N_SCENES} scenes ===")
-    clips = molab.run("pilot", n_scenes=N_SCENES)
+    print(f"=== 3/5 smoke test + build {_n} scenes ===")
+    clips = molab.run("pilot", n_scenes=_n)
     print(clips.to_string(index=False))
-    print("=== 4/4 evaluate ===")
+    print("=== 4/5 evaluate ===")
     results = molab.run("evaluate")
+    print(results.to_string(index=False))
+    print("=== 5/5 robustness (recompression + camera-simulating attacks) ===")
+    robust = molab.run("robust")
     print("ALL DONE - download c44_results.zip from the file browser")
-    results
+    robust
     return
 
 

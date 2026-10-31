@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("cps", help="capture-physics score (out-of-fold)")
     sub.add_parser("features", help="CPS per-clip features only (CPU)")
     sub.add_parser("evaluate", help="detectors + CPS + report tables (what the molab notebook runs)")
+    sub.add_parser("robust", help="recompression + camera-simulating attack variants, rescored")
     sub.add_parser("report", help="metrics table")
     a = p.parse_args(argv)
 
@@ -68,8 +69,12 @@ def main(argv: list[str] | None = None) -> None:
         print(df.describe().T.round(3).to_string() if len(df) else "no clips")
         if not len(df) or not df.drop(columns=["clip_id"]).notna().any().any():
             raise SystemExit("CPS features are empty/NaN")
-    elif a.cmd == "evaluate":
-        pipeline.run_detectors(("univfd", "npr", "consistency"), store=store)
+    elif a.cmd in ("evaluate", "robust"):
+        if a.cmd == "robust":
+            for kind in pipeline.VARIANTS:
+                pipeline.build_variants(kind, store=store)
+        cells = sorted(pipeline.manifest().to_frame().cell.unique())
+        pipeline.run_detectors(("univfd", "npr", "consistency"), cells=cells, store=store)
         n_rc = len(pipeline.manifest().by_cell("RC"))
         pipeline.run_cps(n_folds=0 if n_rc < 30 else 5, min_train=4 if n_rc < 30 else 10, store=store)
         pipeline.report(n_boot=500)

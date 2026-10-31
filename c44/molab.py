@@ -13,13 +13,14 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections import deque
 from pathlib import Path
 
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v11-gr-slow-path"
+VERSION = "v12-scale-ready"
 
 
 def _check_access() -> list[str]:
@@ -40,13 +41,16 @@ def _stage(args: list[str]) -> tuple[int, str]:
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "TQDM_DISABLE": "1", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
            "PYTHONPATH": os.pathsep.join(p for p in (code_root, os.environ.get("PYTHONPATH", "")) if p)}
     print(f"\n$ c44 {' '.join(args)}", flush=True)
+    t0 = time.time()
     p = subprocess.Popen([sys.executable, "-u", "-m", "c44", *args], env=env, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(Path.cwd()))
     tail: deque = deque(maxlen=40)
     for line in p.stdout:
         print(line, end="", flush=True)
         tail.append(line)
-    return p.wait(), "".join(tail)
+    rc = p.wait()
+    print(f"[c44 {args[0]}: {(time.time() - t0) / 60:.1f} min, exit {rc}]", flush=True)
+    return rc, "".join(tail)
 
 
 def _need(args: list[str]) -> None:
@@ -133,7 +137,11 @@ def _smoke() -> None:
 
 
 def _build(n: int, smoke: bool = True) -> "object":
-    Store().ensure_repo()
+    store = Store()
+    store.ensure_repo()
+    if store.enabled:
+        print(f"resuming from private HF repo {store.repo_id} (if it has earlier work)")
+        _need(["pull"])
     if smoke:
         _smoke()
     _need(["rc", "--n", str(n)])
@@ -168,6 +176,12 @@ def run(stage: str, n_scenes: int | None = None):
         return None
     if stage in ("pilot", "full"):
         return _build(n_scenes or (6 if stage == "pilot" else 150))
+    if stage == "robust":
+        import pandas as pd
+        _need(["robust"])
+        zip_path = shutil.make_archive(str(Path.cwd() / "c44_results"), "zip", config.work_dir(), base_dir="results")
+        print(f"results (with robustness variants) saved to {zip_path}")
+        return pd.read_csv(config.work_dir() / "results" / "report.csv").round(3)
     if stage == "evaluate":
         import pandas as pd
         _need(["evaluate"])
@@ -176,4 +190,4 @@ def run(stage: str, n_scenes: int | None = None):
         print(f"results saved to {zip_path} - download it from the file browser before the session ends")
         print(pd.read_csv(res / "feature_auc.csv").round(3).to_string(index=False))
         return pd.read_csv(res / "report.csv").round(3)
-    raise ValueError("stage must be check, setup, smoke, pilot, evaluate or full")
+    raise ValueError("stage must be check, setup, smoke, pilot, evaluate, robust or full")
