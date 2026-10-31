@@ -209,7 +209,13 @@ def install_base() -> None:
 def install_gsplat() -> None:
     env = {"TORCH_CUDA_ARCH_LIST": gpu_arch(), "MAX_JOBS": str(max(2, (os.cpu_count() or 4)))}
     inc = _cccl_include_dirs()
+    if not inc:   # CUDA 13 wheel layout lacks <nv/target>; fetch CCCL headers only
+        pip_install("--no-deps", "nvidia-cuda-cccl")
+        inc = _cccl_include_dirs()
+    if not inc:
+        raise RuntimeError("CCCL headers (<nv/target>) not found even after installing nvidia-cuda-cccl")
     if inc:
+        env["NVCC_APPEND_FLAGS"] = " ".join(f"-I{d}" for d in inc)
         print("CCCL headers:", inc)
         for var in ("CPATH", "CPLUS_INCLUDE_PATH", "C_INCLUDE_PATH"):
             env[var] = ":".join(inc + [os.environ.get(var, "")]).rstrip(":")
@@ -268,7 +274,7 @@ def remove_shadow_torch() -> None:
         return
     out = subprocess.run(["uv", "pip", "list", "--python", sys.executable], capture_output=True, text=True).stdout
     pkgs = [l.split()[0] for l in out.splitlines()[2:]
-            if l.split() and (l.split()[0] in ("torch", "triton", "torchvision") or l.split()[0].startswith("nvidia-"))]
+            if l.split() and (l.split()[0] in ("torch", "triton", "torchvision") or (l.split()[0].startswith("nvidia-") and "cccl" not in l.split()[0]))]
     if pkgs and shutil.which("uv"):
         run(["uv", "pip", "uninstall", "--python", sys.executable, *pkgs], check=False)
 
