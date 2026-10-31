@@ -39,6 +39,21 @@ Press the buttons in order; wait for each to finish.
 
 @app.cell
 def _(mo):
+    token_box = mo.ui.text(kind="password", label="Paste your Hugging Face token (hf_...)", full_width=True)
+    token_box
+    return (token_box,)
+
+
+@app.cell
+def _(token_box):
+    import os as _os
+    if token_box.value.strip():
+        _os.environ["HF_TOKEN"] = token_box.value.strip()
+    return
+
+
+@app.cell
+def _(mo):
     check_btn = mo.ui.run_button(label="0 · Check (1 min)")
     setup_btn = mo.ui.run_button(label="1 · Setup (20-45 min)")
     pilot_btn = mo.ui.run_button(label="2 · Pilot, 6 scenes (30-45 min)")
