@@ -14,6 +14,11 @@ import numpy as np
 from .base import Detector, sample_frames
 
 
+def strip_module_prefix(sd: dict) -> dict:
+    """The released NPR.pth was saved from nn.DataParallel: keys start with 'module.'."""
+    return {(k[len("module."):] if k.startswith("module.") else k): v for k, v in sd.items()}
+
+
 class NPR(Detector):
     name = "npr"
 
@@ -26,7 +31,8 @@ class NPR(Detector):
         spec.loader.exec_module(mod)
         model = mod.resnet50(num_classes=1)
         sd = torch.load(repo_dir / "NPR.pth", map_location="cpu")
-        model.load_state_dict(sd.get("model", sd) if isinstance(sd, dict) else sd, strict=True)
+        sd = sd.get("model", sd) if isinstance(sd, dict) else sd
+        model.load_state_dict(strip_module_prefix(sd), strict=True)
         self.model = model.to(device).eval()
         self.tf = transforms.Compose([
             transforms.Resize((256, 256)),

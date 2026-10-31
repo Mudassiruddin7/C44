@@ -72,3 +72,29 @@ def test_flashworld_param_split():
     assert torch.allclose(gs["colors"].reshape(N, -1), p[:, 11:])
     with pytest.raises(ValueError):
         gs_render.flashworld_params_to_gs(torch.randn(N, 20))
+
+
+def test_index_uses_only_3dgs_zips(tmp_path, monkeypatch):
+    """imgs_undist/<subset>/<hash>.zip shares the scene hash and sorts after 3DGS/: it must not override it."""
+    import huggingface_hub
+    h = "a" * 64
+    files = {
+        "DL3DV/DL3DV-ALL-video": [f"5K/{h}/video.mp4"],
+        "DL3DV/DL3DV-GS-960P": [f"3DGS/5K/{h}.zip", f"imgs_undist/5K/{h}.zip", "README.md"],
+    }
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo, repo_type=None):
+            return files[repo]
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    idx = dl3dv.build_index(token="x", cache=tmp_path / "idx.json")
+    assert idx[h]["gs"] == f"3DGS/5K/{h}.zip"
+
+
+def test_npr_state_dict_prefix():
+    from c44.detectors.npr import strip_module_prefix
+    assert strip_module_prefix({"module.conv1.weight": 1, "fc1.bias": 2}) == {"conv1.weight": 1, "fc1.bias": 2}

@@ -11,6 +11,7 @@ import json
 import shutil
 import traceback
 import zlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -91,6 +92,9 @@ def build_rc(n: int, seed: int = 0, store: Store | None = None, log: Log = print
              keep_video: bool = False, batch: int = 10) -> list[str]:
     """Real camera clips: one 48-frame window per sampled DL3DV scene (scenes with a 3DGS model only)."""
     index = dl3dv.build_index()
+    for c in manifest().by_cell("RC"):               # e.g. clips built before the index only listed 3DGS zips
+        if not index.get(c.scene, {}).get("gs"):
+            manifest().add(replace(c, status="qc_fail", meta={**c.meta, "reason": "no 3DGS model for this scene"}))
     scenes = dl3dv.sample_scenes(index, n, seed)
     done, made = _finished("RC"), []
     for k, scene in enumerate(scenes):

@@ -35,6 +35,11 @@ class FlashWorld:
             app = importlib.import_module("app")
         finally:
             os.chdir(cwd)
+        # FlashWorld was written for an older gsplat; in gsplat 1.5.3 rasterization(packed=True, backgrounds=...) trips
+        # an assertion (expects a vector, FlashWorld passes [C, D]). packed=False gives identical renders.
+        import functools
+        render_mod = importlib.import_module("models.render")
+        render_mod.rasterization = functools.partial(render_mod.rasterization, packed=False)
         if ckpt_path is None:
             from huggingface_hub import hf_hub_download
             ckpt_path = hf_hub_download("imlixinyang/FlashWorld", "model.ckpt")

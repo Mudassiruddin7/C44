@@ -23,7 +23,7 @@ REPO_GS = "DL3DV/DL3DV-GS-960P"
 # ----------------------------------------------------------------------------- index
 def build_index(token: str | None = None, cache: Path | None = None, refresh: bool = False) -> dict[str, dict]:
     """scene hash -> {'video': repo path, 'gs': repo path or None}; cached as JSON in the work dir."""
-    cache = cache or (config.work_dir() / "dl3dv_index.json")
+    cache = cache or (config.work_dir() / "dl3dv_index_v2.json")
     if cache.exists() and not refresh:
         return json.loads(cache.read_text())
     from huggingface_hub import HfApi
@@ -31,7 +31,8 @@ def build_index(token: str | None = None, cache: Path | None = None, refresh: bo
     vids = api.list_repo_files(REPO_VIDEO, repo_type="dataset")
     gss = api.list_repo_files(REPO_GS, repo_type="dataset")
     v = {p.split("/")[-2]: p for p in vids if p.endswith("/video.mp4")}
-    g = {Path(p).stem: p for p in gss if p.endswith(".zip")}
+    # the repo also holds imgs_undist/<subset>/<hash>.zip (undistorted images, no Gaussians): 3DGS/ only
+    g = {Path(p).stem: p for p in gss if p.startswith("3DGS/") and p.endswith(".zip")}
     index = {h: {"video": v[h], "gs": g.get(h)} for h in sorted(v)}
     cache.write_text(json.dumps(index))
     return index
