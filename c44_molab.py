@@ -14,6 +14,8 @@ def _():
 
     import marimo as mo
 
+    N_SCENES = 6  # pilot. Set 150 for the full benchmark (6-9 h).
+
     # Downloads the C44 code from GitHub (once per session) and makes it importable.
     _dst = os.path.abspath("C44")
     if not os.path.exists(_dst):
@@ -24,77 +26,33 @@ def _():
         sys.path.insert(0, _dst)
     from c44 import molab
 
-    return mo, molab
+    return N_SCENES, mo, molab, os
 
 
 @app.cell
 def _(mo):
-    mo.md("""
-# C44 on molab
-Before running: attach the RTX PRO 6000 GPU, and add `HF_TOKEN` in the **Secrets** panel.
-Press the buttons in order; wait for each to finish.
-""")
-    return
-
-
-@app.cell
-def _(mo):
-    token_box = mo.ui.text(kind="password", label="Paste your Hugging Face token (hf_...)", full_width=True)
+    token_box = mo.ui.text(kind="password", label="Paste your Hugging Face token (hf_...) and press Enter",
+                           full_width=True)
     token_box
     return (token_box,)
 
 
 @app.cell
-def _(token_box):
-    import os as _os
-    if token_box.value.strip():
-        _os.environ["HF_TOKEN"] = token_box.value.strip()
-    return
-
-
-@app.cell
-def _(mo):
-    check_btn = mo.ui.run_button(label="0 · Check (1 min)")
-    setup_btn = mo.ui.run_button(label="1 · Setup (20-45 min)")
-    pilot_btn = mo.ui.run_button(label="2 · Pilot, 6 scenes (30-45 min)")
-    eval_btn = mo.ui.run_button(label="3 · Evaluate (10-15 min)")
-    full_btn = mo.ui.run_button(label="4 · Full, 150 scenes (6-9 h)")
-    mo.vstack([check_btn, setup_btn, pilot_btn, eval_btn, full_btn])
-    return check_btn, eval_btn, full_btn, pilot_btn, setup_btn
-
-
-@app.cell
-def _(check_btn, mo, molab):
-    mo.stop(not check_btn.value)
+def _(N_SCENES, mo, molab, os, token_box):
+    # Runs the whole pipeline automatically as soon as a token is present: check -> setup -> build -> evaluate.
+    mo.stop(not token_box.value.strip(), mo.md("Waiting for the token above. Everything runs automatically after."))
+    os.environ["HF_TOKEN"] = token_box.value.strip()
+    print("=== 1/4 check ===")
     molab.run("check")
-    return
-
-
-@app.cell
-def _(mo, molab, setup_btn):
-    mo.stop(not setup_btn.value)
+    print("=== 2/4 setup (20-45 min) ===")
     molab.run("setup")
-    return
-
-
-@app.cell
-def _(mo, molab, pilot_btn):
-    mo.stop(not pilot_btn.value)
-    molab.run("pilot")
-    return
-
-
-@app.cell
-def _(eval_btn, mo, molab):
-    mo.stop(not eval_btn.value)
-    molab.run("evaluate")
-    return
-
-
-@app.cell
-def _(full_btn, mo, molab):
-    mo.stop(not full_btn.value)
-    molab.run("full")
+    print(f"=== 3/4 build {N_SCENES} scenes ===")
+    clips = molab.run("pilot", n_scenes=N_SCENES)
+    print(clips.to_string(index=False))
+    print("=== 4/4 evaluate ===")
+    results = molab.run("evaluate")
+    print("ALL DONE - download c44_results.zip from the file browser")
+    results
     return
 
 
