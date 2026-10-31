@@ -163,23 +163,33 @@ def _drop_results(clip_id: str) -> None:
                 df[df[col] != clip_id].to_csv(f, index=False)
 
 
-def scale_path(c2w: np.ndarray, s: float) -> np.ndarray:
-    """Scale camera translations about the first camera (first view unchanged)."""
-    out = np.array(c2w, dtype=np.float64, copy=True)
-    out[:, :3, 3] = c2w[0, :3, 3] + s * (c2w[:, :3, 3] - c2w[0, :3, 3])
+def slow_path(c2w: np.ndarray, f: float) -> np.ndarray:
+    """Render only the first fraction f of the camera trajectory, resampled to the same number of frames
+    (translations lerped, rotations slerped). Every pose stays ON the path FlashWorld generated the world along, so
+    coverage stays high, and image motion (translation and rotation alike) scales ~linearly with f."""
+    from scipy.spatial.transform import Rotation, Slerp
+    c2w = np.asarray(c2w, dtype=np.float64)
+    T = len(c2w)
+    u = np.linspace(0.0, f * (T - 1), T)
+    out = np.tile(np.eye(4), (T, 1, 1))
+    for k in range(3):
+        out[:, k, 3] = np.interp(u, np.arange(T), c2w[:, k, 3])
+    out[:, :3, :3] = Slerp(np.arange(T), Rotation.from_matrix(c2w[:, :3, :3]))(u).as_matrix()
     return out
 
 
 def calibrate_scale(measure: Callable[[float], float], target: float, tol: float = 0.1, iters: int = 4,
-                    lo: float = 0.02, hi: float = 50.0) -> tuple[float, float]:
-    """Find the path scale s with measure(s) ~ target (image motion is ~linear in translation).
-    The last call to `measure` is always at the returned s."""
+                    lo: float = 0.05, hi: float = 1.0) -> tuple[float, float]:
+    """Find f in [lo, hi] with measure(f) ~ target (image motion is ~linear in f). hi=1 because a path cannot be
+    played faster than it was generated. The last call to `measure` is always at the returned f."""
     s, m = 1.0, measure(1.0)
     for _ in range(iters):
         if not (np.isfinite(m) and m > 1e-6 and np.isfinite(target) and target > 1e-6) or abs(m / target - 1) <= tol:
             break
-        s = float(np.clip(s * target / m, lo, hi))
-        m = measure(s)
+        new = float(np.clip(s * target / m, lo, hi))
+        if abs(new - s) < 1e-3:
+            break
+        s, m = new, measure(new)
     return s, m
 
 
@@ -188,9 +198,9 @@ def build_gr(fw, seed: int = 0, store: Store | None = None, log: Log = print, ge
     """FlashWorld world per RC clip: first frame + 24 keyframes of its camera path; rendered along all 48 poses."""
     caps_path = config.work_dir() / "captions.json"
     caps = json.loads(caps_path.read_text()) if caps_path.exists() else {}
-    # GR clips built before motion calibration (no path_scale) are stale: regenerate them
+    # GR clips built before motion calibration (no path_speed) are stale: regenerate them
     done = {c.parent for c in manifest().load().values()
-            if c.cell == "GR" and c.status in ("ok", "qc_fail") and "path_scale" in c.meta}
+            if c.cell == "GR" and c.status in ("ok", "qc_fail") and "path_speed" in c.meta}
     todo = [c for c in manifest().by_cell("RC") if c.clip_id not in done][:limit]
     made = []
     for i, rc in enumerate(todo):
@@ -203,31 +213,32 @@ def build_gr(fw, seed: int = 0, store: Store | None = None, log: Log = print, ge
             cam_key = cameras.to_fw_cam11(c2w[key], K, SPEC.width, SPEC.height)
             text = caps.get(rc.clip_id, "")
             scene, ref, Tn, secs = fw.generate(frames[0], cam_key, text, image_index=0, seed=seed)
-            # The RC path is in VGGT's arbitrary units and FlashWorld's world has its own depth scale, so the same
-            # path gives arbitrary image motion. Generation is scale-invariant (cameras are normalised), so rescale
-            # only the render path until the measured image motion matches the RC clip's (as for RR).
+            # The RC path is in VGGT's arbitrary units and FlashWorld's world has its own depth scale (cameras are
+            # normalised), so the same path gives arbitrary image motion. Play the path more slowly (a shorter stretch
+            # of it) until the measured image motion matches the RC clip's, as is done for RR. Poses stay on the
+            # generated path, so coverage is unaffected.
             geo = geo or geometry.VGGTGeometry()
             target = float(np.nanmedian(geometry.motion(g)["m"]))
             last = {}
 
             def render_at(s: float) -> float:
-                cam = cameras.to_fw_cam11(scale_path(c2w, s), K, SPEC.width, SPEC.height)
+                cam = cameras.to_fw_cam11(slow_path(c2w, s), K, SPEC.width, SPEC.height)
                 last["frames"], last["qc"] = fw.render_path(scene, ref, Tn, cam, SPEC.width, SPEC.height,
                                                             SPEC.background)
                 return float(np.nanmedian(geometry.motion(geo(last["frames"]))["m"]))
 
-            path_scale, motion_gr = calibrate_scale(render_at, target)
+            path_speed, motion_gr = calibrate_scale(render_at, target)
             out_frames, qc = last["frames"], last["qc"]
             del scene
             cov = float(qc["coverage"].mean())
             _add_clip("GR", cid, rc.scene, out_frames, geo, "flashworld", parent=rc.clip_id,
                       status="ok" if cov >= SPEC.min_coverage else "qc_fail", store=store, coverage=cov,
-                      holes=float(qc["holes"].mean()), gen_seconds=secs, caption=text, T_norm=Tn, path_scale=path_scale,
+                      holes=float(qc["holes"].mean()), gen_seconds=secs, caption=text, T_norm=Tn, path_speed=path_speed,
                       motion_target=target, motion_before_encode=motion_gr)
             _drop_results(cid)
             made.append(cid)
             log(f"[GR] {i + 1}/{len(todo)} {cid} coverage={cov:.3f} gen={secs:.1f}s "
-                f"path_scale={path_scale:.2f} motion {motion_gr:.2f} (RC {target:.2f})")
+                f"path_speed={path_speed:.2f} motion {motion_gr:.2f} (RC {target:.2f})")
         except Exception as e:                    # noqa: BLE001
             log(f"[GR] {rc.clip_id} failed: {_why(e)}")
             _fail("GR", cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")

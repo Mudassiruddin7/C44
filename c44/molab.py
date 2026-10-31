@@ -19,7 +19,7 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v10-gr-motion-match"
+VERSION = "v11-gr-slow-path"
 
 
 def _check_access() -> list[str]:

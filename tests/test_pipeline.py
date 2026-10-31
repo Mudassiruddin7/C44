@@ -121,23 +121,31 @@ def test_full_pipeline_with_fakes(work):
     assert {"GR", "RR", "GR@blur"} <= set(fa.cell) and fa.drop(columns="cell").stack().between(0, 1).all()
 
 
-def test_calibrate_scale_matches_target_and_ends_at_returned_scale():
+def test_calibrate_matches_target_and_ends_at_returned_value():
     calls = []
 
-    def measure(s):
-        calls.append(s)
-        return 2.8 * s ** 0.95                       # slightly sub-linear, like real parallax/occlusion
+    def measure(f):
+        calls.append(f)
+        return 2.8 * f ** 0.95                       # slightly sub-linear, like real parallax/occlusion
 
-    s, m = pipeline.calibrate_scale(measure, target=1.0)
-    assert abs(m - 1.0) < 0.1 and calls[-1] == s and s < 0.5
-    # already matched -> untouched; degenerate measurements -> untouched
-    assert pipeline.calibrate_scale(lambda s: 1.05, 1.0)[0] == 1.0
-    assert pipeline.calibrate_scale(lambda s: float("nan"), 1.0)[0] == 1.0
+    f, m = pipeline.calibrate_scale(measure, target=1.0)
+    assert abs(m - 1.0) < 0.1 and calls[-1] == f and f < 0.5
+    assert pipeline.calibrate_scale(lambda f: 1.05, 1.0)[0] == 1.0                 # already matched
+    assert pipeline.calibrate_scale(lambda f: float("nan"), 1.0)[0] == 1.0         # degenerate
+    n = []
+    f, m = pipeline.calibrate_scale(lambda f: n.append(f) or 0.5, 1.0)             # too slow: cannot speed up
+    assert f == 1.0 and len(n) == 1
 
 
-def test_scale_path_keeps_first_camera():
-    c2w = np.stack([np.eye(4) for _ in range(5)])
-    c2w[:, :3, 3] = np.arange(5)[:, None] * np.array([1.0, 0, 0]) + np.array([3.0, 1, 2])
-    out = pipeline.scale_path(c2w, 0.5)
-    assert np.allclose(out[0], c2w[0]) and np.allclose(out[4, :3, 3], [3 + 2.0, 1, 2])
-    assert np.allclose(out[:, :3, :3], c2w[:, :3, :3])
+def test_slow_path_stays_on_the_path():
+    from scipy.spatial.transform import Rotation
+    T = 9
+    c2w = np.tile(np.eye(4), (T, 1, 1))
+    c2w[:, :3, :3] = Rotation.from_rotvec(np.outer(np.radians(np.linspace(0, 40, T)), [0, 1, 0])).as_matrix()
+    c2w[:, :3, 3] = np.linspace(0, 1, T)[:, None] * np.array([2.0, 0.5, 0.0]) + np.array([1.0, 1.0, 1.0])
+    assert np.allclose(pipeline.slow_path(c2w, 1.0), c2w, atol=1e-9)
+    half = pipeline.slow_path(c2w, 0.5)
+    assert np.allclose(half[0], c2w[0]) and np.allclose(half[-1], c2w[T // 2], atol=1e-9)
+    assert np.allclose(half[:, :3, :3] @ np.swapaxes(half[:, :3, :3], 1, 2), np.eye(3), atol=1e-9)
+    step = np.linalg.norm(np.diff(half[:, :3, 3], axis=0), axis=1)
+    assert np.allclose(step, step[0]) and step[0] < np.linalg.norm(c2w[1, :3, 3] - c2w[0, :3, 3])
