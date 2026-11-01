@@ -179,3 +179,10 @@ def test_noise_calibration_hits_target_after_encoding():
     # a clip already noisier than the target gets (almost) no extra noise
     g2, _ = pipeline.calibrate_noise_gain(lambda g: attacks.sensor_noise(frames, gain=g, prnu_std=0.01, seed=seed), ref * 0.2)
     assert g2 <= 1e-4
+
+
+def test_repo_id_accepts_urls():
+    from c44.config import normalize_repo_id as n
+    assert n("a/b") == "a/b" and n(" a/b/ ") == "a/b" and n("datasets/a/b") == "a/b"
+    assert n("https://huggingface.co/datasets/mudassiruddin21/c44-w2v") == "mudassiruddin21/c44-w2v"
+    assert n("https://huggingface.co/datasets/a/b/tree/main") == "a/b" and n("") is None and n(None) is None

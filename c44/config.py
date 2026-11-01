@@ -86,7 +86,19 @@ def hf_token() -> str | None:
 def hf_repo() -> str | None:
     """Private HF dataset repo used to persist outputs across 12-hour molab sessions, e.g. 'you/c44-w2v'."""
     load_dotenv()
-    return os.environ.get("C44_HF_REPO")
+    return normalize_repo_id(os.environ.get("C44_HF_REPO"))
+
+
+def normalize_repo_id(repo: str | None) -> str | None:
+    """Accept 'user/name', 'datasets/user/name' or a full huggingface.co URL (with or without trailing '/' or '/tree/..')."""
+    if not repo:
+        return None
+    r = repo.strip()
+    for prefix in ("https://huggingface.co/", "http://huggingface.co/", "huggingface.co/"):
+        if r.startswith(prefix):
+            r = r[len(prefix):]
+    r = r.removeprefix("datasets/").strip("/")
+    return "/".join(r.split("/")[:2]) or None
 
 
 load_dotenv()
