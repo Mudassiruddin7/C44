@@ -186,7 +186,7 @@ def attack_calibration(f: pd.DataFrame) -> pd.DataFrame:
     rc = f[f.cell == "RC"].set_index("scene")
     rows = []
     for c in sorted(set(f.cell)):
-        if "@" in c and "noisecal" in c:
+        if "@" in c and "noiseadapt" in c:
             a = f[f.cell == c]
             ref = rc.reindex(a.scene)
             ratio = (a.resid_level.to_numpy() / ref.resid_level.to_numpy())

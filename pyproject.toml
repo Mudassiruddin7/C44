@@ -1,6 +1,6 @@
 [project]
 name = "c44"
-version = "0.1.0"
+version = "0.2.0"
 description = "W2V benchmark: videos rendered from generated 3D worlds vs. video forensics (CVPR 2027 idea C44)"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,6 +20,7 @@ dependencies = [
 # GPU stack, installed on molab by c44.setup_env (pinned there, see README)
 gpu = ["torch", "transformers", "gsplat"]
 dev = ["pytest"]
+notebook = ["marimo"]
 
 [tool.setuptools.packages.find]
 include = ["c44*"]

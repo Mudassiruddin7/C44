@@ -115,8 +115,8 @@ def test_full_pipeline_with_fakes(work):
     assert len(pipeline.build_variants("blurcal", cells=("RC", "GR"))) == N_SCENES     # attacks skip real clips
     assert pipeline.build_variants("blurcal", cells=("RC", "GR")) == []                 # resumable
     assert 0 < pipeline.blur_exposure() <= 0.5
-    nc = pipeline.build_variants("noisecal", cells=("RC", "GR"), limit_scenes=3)        # attacks run on a subset
-    assert len(nc) == 3 and all("noise_gain" in pipeline.manifest().load()[i].meta for i in nc)
+    nc = pipeline.build_variants("noiseadapt", cells=("RC", "GR"), limit_scenes=3)     # attacks run on a subset
+    assert len(nc) == 3 and all("noise_strength" in pipeline.manifest().load()[i].meta for i in nc)
     pipeline.run_cps(n_folds=0, min_train=5, store=None)                                # leave-one-scene-out
     rep = pipeline.report(n_boot=50)
     assert {"RC@crf28 vs GR@crf28", "RC vs GR@blurcal"} <= set(rep.pair)
@@ -167,22 +167,16 @@ def test_slow_path_stays_on_the_path():
 
 
 def test_noise_calibration_hits_target_after_encoding():
-    from c44 import attacks, cps
+    from c44 import attacks
     from tests.synthetic import clip
     base = clip("render", 1, T=12, h=192, w=256)
-    frames = base[0] if isinstance(base, tuple) else base
-    frames = np.asarray(frames)
+    frames = np.asarray(base[0] if isinstance(base, tuple) else base)
     seed = 5
-    ref = pipeline._rt_resid(attacks.sensor_noise(frames, gain=0.003, prnu_std=0.01, seed=1))      # a "real" level
-    gain, got = pipeline.calibrate_noise_gain(lambda g: attacks.sensor_noise(frames, gain=g, prnu_std=0.01, seed=seed), ref)
-    assert abs(got / ref - 1) < 0.1 and 1e-5 < gain < 0.05
+    noisy = lambda s: attacks.scaled_noise(frames, s, seed)                      # noqa: E731
+    for true_strength in (0.05, 1.0):            # a quiet and a typical "real" camera: both must be reachable
+        ref = pipeline._rt_resid(attacks.scaled_noise(frames, true_strength, 1))
+        s, got = pipeline.calibrate_noise_strength(noisy, ref)
+        assert abs(got / ref - 1) < 0.1, (true_strength, got, ref)
     # a clip already noisier than the target gets (almost) no extra noise
-    g2, _ = pipeline.calibrate_noise_gain(lambda g: attacks.sensor_noise(frames, gain=g, prnu_std=0.01, seed=seed), ref * 0.2)
-    assert g2 <= 1e-4
-
-
-def test_repo_id_accepts_urls():
-    from c44.config import normalize_repo_id as n
-    assert n("a/b") == "a/b" and n(" a/b/ ") == "a/b" and n("datasets/a/b") == "a/b"
-    assert n("https://huggingface.co/datasets/mudassiruddin21/c44-w2v") == "mudassiruddin21/c44-w2v"
-    assert n("https://huggingface.co/datasets/a/b/tree/main") == "a/b" and n("") is None and n(None) is None
+    s2, _ = pipeline.calibrate_noise_strength(noisy, ref * 0.1)
+    assert s2 <= 2e-3

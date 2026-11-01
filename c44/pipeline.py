@@ -472,10 +472,10 @@ def run_cps(n_folds: int = 5, seed: int = 0, store: Store | None = None, log: Lo
 VARIANTS = {
     "crf23": ("compress", 23), "crf28": ("compress", 28), "crf35": ("compress", 35),
     # Camera-aware attackers. Blur exposure is calibrated once (blur_exposure) so that attacked renders reproduce the real
-    # clips' sharpness-vs-motion behaviour; noise gain is calibrated per clip to the paired real clip's noise level.
-    # The earlier fixed-parameter "blur"/"noise"/"blur+noise" variants overshot (the detectors then flagged the attack
-    # itself) and are retired.
-    "blurcal": ("blurcal", None), "noisecal": ("noisecal", None), "blurcal+noisecal": ("blurcal+noisecal", None),
+    # clips' sharpness-vs-motion behaviour; noise strength is calibrated per clip to the paired real clip's noise level.
+    # Retired: fixed-parameter "blur"/"noise"/"blur+noise" (overshot) and "noisecal"/"blurcal+noisecal" (calibrated only
+    # the shot-noise gain, so a read-noise floor kept 117/288 clips at 1.3-1.7x the real noise level).
+    "blurcal": ("blurcal", None), "noiseadapt": ("noiseadapt", None), "blurcal+noiseadapt": ("blurcal+noiseadapt", None),
 }
 CAL_FRAMES = 12
 
@@ -490,11 +490,12 @@ def _rt_resid(frames: np.ndarray) -> float:
     return out
 
 
-def calibrate_noise_gain(noisy: Callable[[float], np.ndarray], target: float, g_lo: float = 1e-5,
-                         g0: float = 0.004, g_hi: float = 0.05) -> tuple[float, float]:
-    """Gain at which the encoded noisy clip's resid_level matches `target`. resid_level^2 is ~affine in the gain
-    (shot noise + fixed read noise), so fit it from two probes and solve; then one correction step.
-    Returns (gain, achieved resid_level)."""
+def calibrate_noise_strength(noisy: Callable[[float], np.ndarray], target: float, s_lo: float = 1e-3,
+                             s0: float = 1.0, s_hi: float = 30.0) -> tuple[float, float]:
+    """Noise strength (attacks.scaled_noise) at which the encoded noisy clip's resid_level matches `target`.
+    resid_level^2 is ~affine in the strength (all noise variances scale with it), so fit it from two probes and solve,
+    then apply one correction step. Returns (strength, achieved resid_level)."""
+    g_lo, g0, g_hi = s_lo, s0, s_hi
     r_lo, r0 = _rt_resid(noisy(g_lo)), _rt_resid(noisy(g0))
     if not (np.isfinite(r_lo) and np.isfinite(r0) and np.isfinite(target)) or target * target <= r_lo * r_lo:
         return g_lo, r_lo                          # already noisier than the real clip: add (almost) nothing
@@ -567,14 +568,14 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
                 m, d = _motion_dir(cell, c)
                 if "blurcal" in op:
                     frames = attacks.motion_blur(frames, m, d, exposure=blur_exposure(log=log))
-                if "noisecal" in op:
+                if "noiseadapt" in op:
                     seed = zlib.crc32(cid.encode())
                     rc = allc[c.parent]
                     target = cps.resid_level(video.read_video(_abs(rc.path))[2:CAL_FRAMES])
-                    gain, got = calibrate_noise_gain(
-                        lambda g: attacks.sensor_noise(frames[:CAL_FRAMES], gain=g, prnu_std=0.01, seed=seed), target)
-                    frames = attacks.sensor_noise(frames, gain=gain, prnu_std=0.01, seed=seed)
-                    extra = {"noise_gain": gain, "resid_target": target, "resid_got": got}
+                    strength, got = calibrate_noise_strength(
+                        lambda s: attacks.scaled_noise(frames[:CAL_FRAMES], s, seed), target)
+                    frames = attacks.scaled_noise(frames, strength, seed)
+                    extra = {"noise_strength": strength, "resid_target": target, "resid_got": got}
                 video.write_mp4(frames, out, SPEC.fps, SPEC.crf, SPEC.preset)
             shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, cid))
             manifest().add(Clip(cid, vcell, c.scene, _rel(out), c.n_frames, c.fps, c.width, c.height,

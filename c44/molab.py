@@ -20,7 +20,7 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v13-all-in-one"
+VERSION = "v14-noise-fix"
 ATTACK_N = 75      # scenes for the (expensive) calibrated attacks
 CONTROL_N = 40     # scenes for the supersampled-render resolution control
 

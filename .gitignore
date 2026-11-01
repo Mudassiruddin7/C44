@@ -1,6 +1,14 @@
+# secrets and environments
 .env
 .venv/
+
+# python / tooling caches
 __pycache__/
 .pytest_cache/
 *.egg-info/
 __marimo__/
+
+# run outputs (large, unpublished data; the notebook produces them)
+results/
+c44_work/
+*.zip

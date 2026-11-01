@@ -35,6 +35,14 @@ def motion_blur(frames: np.ndarray, m: np.ndarray, direction: np.ndarray, exposu
     return out
 
 
+def scaled_noise(frames: np.ndarray, strength: float, seed: int = 0) -> np.ndarray:
+    """Sensor noise whose whole model scales together: shot, read and fixed-pattern variances are all proportional to
+    `strength` (1.0 = the default sensor_noise). Scaling only the shot-noise gain leaves a read-noise/PRNU floor that is
+    already louder than many real clips, so the level could not be matched."""
+    s = float(strength)
+    return sensor_noise(frames, gain=0.004 * s, read_std=0.004 * np.sqrt(s), prnu_std=0.01 * np.sqrt(s), seed=seed)
+
+
 def sensor_noise(frames: np.ndarray, gain: float = 0.004, read_std: float = 0.004, prnu_std: float = 0.01,
                  seed: int = 0) -> np.ndarray:
     """Poisson-Gaussian noise with a fixed PRNU pattern, applied in (approximately) linear light."""
