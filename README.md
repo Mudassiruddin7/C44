@@ -11,7 +11,7 @@ Benchmark build and evaluation code (CVPR 2027 idea C44). The design is a 2×2 b
 
 Detectors compared: UnivFD, NPR, a multi-view reprojection-consistency detector (a re-implementation of the criterion GenWorld builds on), **CPS-1** (a one-class capture-physics score on 8 VGGT-motion-based features, `c44/cps.py`) and **CPS-2**, the proposed detector (`c44/physics.py`): 23 image-formation cues of a physical camera measured from the pixels alone (optical-flow motion, no depth model), in a supervised and a one-class form. The cues that a renderer lacks by construction: auto-exposure / white-balance dynamics (motion-compensated frame-to-frame gain jitter), temporal vs. spatial noise statistics, noise whiteness and chroma noise, noise-free patches, power-spectrum shape, edge acutance, and blur-motion coupling.
 
-**Protocol.** Scenes are split once by a hash into dev (70%) and held-out test (30%); no design decision uses the test scenes. Models train on dev scenes only; AUCs are on test scenes with scene-level bootstrap CIs. The "aug" variant of CPS-2 trains on recompressed and attacked fakes and, for each attack, on attacks that share no component (blur / noise / exposure jitter) with it, so its ingredients are genuinely unseen.
+**Protocol.** Scenes are split once by a hash into dev (70%) and held-out test (30%); no design decision uses the test scenes. Models train on dev scenes only; AUCs are on test scenes with scene-level bootstrap CIs. The "aug" variant of CPS-2 trains on recompressed and attacked fakes and is reported under three defender assumptions: the attack was **seen**; it is a **new combination** of components seen in other attacks; its **components are all unseen** (no training attack shares blur / noise / exposure jitter with it). Besides the held-out split, every setting is also evaluated with a pre-specified 5-fold scene-grouped cross-validation over *all* scenes (nothing tuned), which triples the sample.
 
 ## Run it (one notebook)
 
@@ -27,16 +27,16 @@ The notebook downloads this repository's code from GitHub on every run, so fixin
 | 1–2 | `check`, `setup` | environment report; VGGT, NPR, FlashWorld, a CUDA 13.0 toolkit matched to torch, gsplat compiled for sm_120 | ~10 min per session |
 | 3 | smoke test + `rc`, `captions`, `gr`, `rr` | one scene through every component first (fails fast with all errors listed), then the full build; resumes from the HF repo | RC 133 min, captions 5, GR 38, RR 165 |
 | 4 | `evaluate` | UnivFD, NPR, consistency, CPS, report | 17 min |
-| 5 | `robust` | recompression (CRF 23/28/35) and camera-aware attacks: calibrated blur, noise matched per clip to its real pair, and an attacker who also fakes exposure / white-balance jitter at the real clip's level | ~1–2 h |
-| 6 | `control` | GR/RR re-rendered at 3× and area-downscaled (resolution/resampling control) on a scene subset | 60 min |
-| 7 | `physics` | CPS-2 features of every clip, parallel over CPU cores | ~10–15 min |
-| 8 | `analyse` | final tables in `results/analysis/` (see `c44/analysis.py`) and the results zip | few min |
+| 5 | `robust` | recompression (CRF 23/28/35) and camera-aware attacks, all 150 scenes, in parallel over CPU cores: calibrated blur, noise matched per clip to its real pair, and exposure / white-balance jitter calibrated to the real clip's measured level | 90 min on 75 scenes serially (v15); parallel, 150 scenes: estimate ~1 h |
+| 6 | `control` | GR/RR re-rendered at 3× and area-downscaled (resolution/resampling control), 100 scenes | 60 min for 40 scenes (v15); estimate ~2.5 h for 100 |
+| 7 | `physics` | CPS-2 features of every clip, parallel over CPU cores | 47 min for 2.5k clips (v15); ~70 min for ~3.5k |
+| 8 | `analyse` | final tables in `results/analysis/` (`summary.md`, CSVs, and `tables.tex` for the paper; see `c44/analysis.py`) and the results zip | ~10 min |
 
 Every GPU stage runs in a fresh subprocess (`python -m c44 <stage>`), so each is also usable from a terminal and is resumable (finished clips are skipped, errored ones retried). molab limits: sessions last 12 h, notebooks stop after 90 idle minutes, and files are not kept, so use the HF repo for long runs.
 
 ```
 python -m c44 setup | pull | rc --n 150 | captions | gr | rr | detect | features | cps | evaluate
-python -m c44 robust --n 75 | control --n 40 | physics | analyse | report
+python -m c44 robust --n 150 | control --n 100 | physics | analyse | report
 python -m c44 gv --limit 150        # experimental video-diffusion cell
 ```
 

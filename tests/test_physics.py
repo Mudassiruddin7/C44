@@ -71,6 +71,26 @@ def test_analysis_protocol_on_toy_features():
     row = main[main.pair == "RC vs GR"].iloc[0]
     assert auc(row["CPS-2 supervised"]) > 0.8 and 0.3 < auc(row["univfd"]) < 0.7
     assert all(str(c).startswith(("only", "minus", "all")) for c in t["cps2_families"].features)
+    att = main[main.setting == "blurcal"]
+    assert {analysis.AUG_COLS["seen"], analysis.AUG_COLS["combination"], analysis.AUG_COLS["components"]} <= set(main.columns)
+    assert len(att) == 2 and att[analysis.AUG_COLS["seen"]].notna().all()
     # test scenes are a fixed hash split and nothing from them is used to fit
     tests = {s for s in pf.scene.unique() if analysis.is_test(s)}
     assert 0.15 < len(tests) / pf.scene.nunique() < 0.45
+
+
+def test_defender_protocols_and_cv_table_and_latex(tmp_path):
+    pf = _toy_features(np.random.default_rng(3), n_scenes=70)
+    kinds = ["blurcal", "blurcal+noiseadapt", "noiseadapt"]
+    assert analysis._train_kinds(kinds, "none", "noiseadapt") == []
+    assert analysis._train_kinds(kinds, "seen", "noiseadapt") == kinds
+    assert analysis._train_kinds(kinds, "combination", "blurcal+noiseadapt") == ["blurcal", "noiseadapt"]
+    assert analysis._train_kinds(kinds, "components", "blurcal+noiseadapt") == []             # every ingredient removed
+    assert analysis._train_kinds(kinds, "components", "noiseadapt") == ["blurcal"]
+    cv = analysis.cv_table(pf)
+    assert {"RC vs GR", "RC vs RR", "RC vs GR@blurcal"} <= set(cv.pair) and cv[analysis.AUG_COLS["components"]].notna().any()
+    tables = {"cps2_main": analysis.physics_tables(pf, pf[["clip_id", "cell", "scene"]])["cps2_main"], "cps2_cv": cv}
+    out = tmp_path / "tables.tex"
+    analysis.write_latex(tables, out)
+    tex = out.read_text()
+    assert tex.count(r"\begin{table}") == tex.count(r"\end{table}") >= 2 and r"\toprule" in tex and "[" in tex

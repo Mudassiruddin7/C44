@@ -34,11 +34,14 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--n", type=int, default=40)
     s.add_argument("--ss", type=int, default=3)
     sub.add_parser("physics", help="CPS-2 physics features of every clip (CPU, parallel)")
+    s = sub.add_parser("figures", help="paper figures from the analysis CSVs (needs matplotlib)")
+    s.add_argument("--dir", required=True, help="folder with cps2_main.csv etc. (results/analysis)")
+    s.add_argument("--out", default="figures")
     sub.add_parser("analyse", help="final tables: detectors, supervised physics score, attacks, control")
     sub.add_parser("report", help="metrics table")
     a = p.parse_args(argv)
 
-    if a.cmd == "physics":                                # one BLAS/OpenMP thread per worker process
+    if a.cmd in ("physics", "robust"):                   # one BLAS/OpenMP thread per worker process
         import os
         for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             os.environ[v] = "1"
@@ -101,6 +104,10 @@ def main(argv: list[str] | None = None) -> None:
         pipeline.run_cps(n_folds=0 if n_rc < 30 else 5, min_train=4 if n_rc < 30 else 10, store=store)
         pipeline.report(n_boot=500)
         pipeline.feature_auc().to_csv(pipeline.results_dir() / "feature_auc.csv", index=False)
+    elif a.cmd == "figures":
+        from . import figures
+        for p in figures.make_figures(a.dir, a.out):
+            print(p)
     elif a.cmd == "physics":
         df = pipeline.physics_features(store=store)
         print(f"{len(df)} clips with physics features")

@@ -20,9 +20,9 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v15-cps2"
-ATTACK_N = 75      # scenes for the (expensive) calibrated attacks
-CONTROL_N = 40     # scenes for the supersampled-render resolution control
+VERSION = "v16-final"
+ATTACK_N = 150     # scenes for the camera-aware attacks (all scenes of the full run)
+CONTROL_N = 100    # scenes for the supersampled-render resolution control
 
 
 def _check_access() -> list[str]:

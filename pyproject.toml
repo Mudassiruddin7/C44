@@ -21,6 +21,7 @@ dependencies = [
 gpu = ["torch", "transformers", "gsplat"]
 dev = ["pytest"]
 notebook = ["marimo"]
+paper = ["matplotlib"]
 
 [tool.setuptools.packages.find]
 include = ["c44*"]

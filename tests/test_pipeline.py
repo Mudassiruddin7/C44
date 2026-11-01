@@ -111,12 +111,14 @@ def test_full_pipeline_with_fakes(work):
     assert set(rep.pair) == {"RC vs GR", "RC vs RR"} and np.isfinite(rep.auc).all()
 
     # robustness variants and camera-simulating attacks become derived cells, paired like-for-like
-    assert len(pipeline.build_variants("crf28", cells=("RC", "GR"))) == 2 * N_SCENES
-    assert len(pipeline.build_variants("blurcal", cells=("RC", "GR"))) == N_SCENES     # attacks skip real clips
-    assert pipeline.build_variants("blurcal", cells=("RC", "GR")) == []                 # resumable
+    assert len(pipeline.build_variants("crf28", cells=("RC", "GR"), n_jobs=1)) == 2 * N_SCENES
+    assert len(pipeline.build_variants("blurcal", cells=("RC", "GR"), n_jobs=1)) == N_SCENES     # attacks skip real clips
+    assert pipeline.build_variants("blurcal", cells=("RC", "GR"), n_jobs=1) == []                 # resumable
     assert 0 < pipeline.blur_exposure() <= 0.5
-    nc = pipeline.build_variants("noiseadapt", cells=("RC", "GR"), limit_scenes=3)     # attacks run on a subset
+    nc = pipeline.build_variants("noiseadapt", cells=("RC", "GR"), limit_scenes=3, n_jobs=1)     # attacks run on a subset
     assert len(nc) == 3 and all("noise_strength" in pipeline.manifest().load()[i].meta for i in nc)
+    ae = pipeline.build_variants("aeadapt", cells=("RC", "GR"), limit_scenes=3, n_jobs=2)             # parallel worker pool
+    assert len(ae) == 3 and all("gain_sigma" in pipeline.manifest().load()[i].meta for i in ae)
     pipeline.run_cps(n_folds=0, min_train=5, store=None)                                # leave-one-scene-out
     rep = pipeline.report(n_boot=50)
     assert {"RC@crf28 vs GR@crf28", "RC vs GR@blurcal"} <= set(rep.pair)

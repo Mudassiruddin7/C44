@@ -116,29 +116,28 @@ def _train_set(dev: pd.DataFrame, compress: bool, attack_kinds) -> tuple[pd.Data
     return d, (d.base != "RC").to_numpy().astype(int)
 
 
-def physics_tables(pf: pd.DataFrame, sw: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    pf = pf.assign(test=pf.scene.map(is_test))
-    dev, test = pf[~pf.test], pf[pf.test]
+def _parts(kind: str) -> set:
+    return set(kind.split("+")) if kind else set()
+
+
+def _train_kinds(attacks, mode: str, kind: str | None):
+    """Which attack kinds a defender has seen. 'seen': all (incl. the evaluated one); 'combination': all but the evaluated one
+    (its components still appear in other attacks); 'components': nothing that shares a component with it."""
+    if mode == "none":
+        return []
+    if mode == "seen":
+        return list(attacks)
+    if mode == "combination":
+        return [a for a in attacks if a != kind]
+    return [a for a in attacks if not (_parts(a) & _parts(kind))]
+
+
+AUG_COLS = {"seen": "CPS-2 + aug (attack seen)", "combination": "CPS-2 + aug (unseen combination)",
+            "components": "CPS-2 + aug (unseen components)"}
+
+
+def _settings(pf: pd.DataFrame):
     attacks = sorted({v for v in pf["var"].unique() if _is_attack(v)})
-
-    m_oc = physics.PhysicsOneClass().fit(dev[dev.cell == "RC"])
-    d0, y0 = _train_set(dev, compress=False, attack_kinds=[])
-    m_clean = physics.PhysicsClassifier().fit(d0, y0)
-    aug = {}
-
-    def parts(kind):
-        return set(kind.split("+")) if kind else set()
-
-    def aug_model(exclude):
-        """Trained with recompressed and attacked fakes. For an evaluated attack, EVERY attack sharing a component with it
-        is left out ("blurcal+noiseadapt" removes blurcal, noiseadapt and every composite containing either), so the
-        attack's ingredients are genuinely unseen."""
-        if exclude not in aug:
-            kinds = [a for a in attacks if not (parts(a) & parts(exclude))]
-            d, y = _train_set(dev, compress=True, attack_kinds=kinds)
-            aug[exclude] = physics.PhysicsClassifier().fit(d, y)
-        return aug[exclude]
-
     pairs = [("RC", "GR", "clean", ""), ("RC", "RR", "clean", "")]
     for k in sorted({v for v in pf["var"].unique() if v.startswith("crf")}):
         pairs += [(f"RC@{k}", f"GR@{k}", k, k), (f"RC@{k}", f"RR@{k}", k, k)]
@@ -147,16 +146,41 @@ def physics_tables(pf: pd.DataFrame, sw: pd.DataFrame) -> dict[str, pd.DataFrame
     for c in ("GRs", "RRs"):
         if c in set(pf.cell):
             pairs += [("RC", c[:2], f"same scenes as {c}", ""), ("RC", c, f"supersampled {c}", "")]
+    return attacks, pairs
+
+
+def _pair_frames(df: pd.DataFrame, neg: str, pos: str, label: str, kind: str):
+    """Real / fake clips of one setting; attacks and the resolution control cover a scene subset, so compare on those scenes."""
+    P, N = df[df.cell == pos], df[df.cell == neg]
+    if label.startswith(("same scenes", "supersampled")):
+        ctl = set(df[df.cell == pos[:2] + "s"].scene) if label.startswith("same") else set(P.scene)
+        P, N = P[P.scene.isin(ctl)], N[N.scene.isin(ctl)]
+    elif _is_attack(kind):
+        N = N[N.scene.isin(set(P.scene))]
+    return N, P
+
+
+def physics_tables(pf: pd.DataFrame, sw: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    pf = pf.assign(test=pf.scene.map(is_test))
+    dev, test = pf[~pf.test], pf[pf.test]
+    attacks, pairs = _settings(pf)
+
+    m_oc = physics.PhysicsOneClass().fit(dev[dev.cell == "RC"])
+    d0, y0 = _train_set(dev, compress=False, attack_kinds=[])
+    m_clean = physics.PhysicsClassifier().fit(d0, y0)
+    cache = {}
+
+    def aug_model(mode, kind=None):
+        key = (mode, kind if mode in ("combination", "components") else None)
+        if key not in cache:
+            d, y = _train_set(dev, True, _train_kinds(attacks, mode, kind))
+            cache[key] = physics.PhysicsClassifier().fit(d, y)
+        return cache[key]
 
     base_scores = sw.set_index("clip_id")
     rows = []
     for neg, pos, label, kind in pairs:
-        P, N = test[test.cell == pos], test[test.cell == neg]
-        if label.startswith(("same scenes", "supersampled")):
-            ctl_scenes = set(test[test.cell == pos[:2] + "s"].scene) if label.startswith("same") else set(P.scene)
-            P, N = P[P.scene.isin(ctl_scenes)], N[N.scene.isin(ctl_scenes)]
-        elif _is_attack(kind):
-            N = N[N.scene.isin(set(P.scene))]
+        N, P = _pair_frames(test, neg, pos, label, kind)
         if len(P) < 5 or len(N) < 5:
             continue
         row = {"pair": f"{neg} vs {pos}", "setting": label, "n_test_pos": len(P)}
@@ -165,13 +189,13 @@ def physics_tables(pf: pd.DataFrame, sw: pd.DataFrame) -> dict[str, pd.DataFrame
                 a = N.assign(s=base_scores[d].reindex(N.clip_id).to_numpy())
                 b = P.assign(s=base_scores[d].reindex(P.clip_id).to_numpy())
                 row[{"cps": "CPS-1 (one-class)"}.get(d, d)] = _fmt(auc_ci(a, b, "s"))
-        models = [("CPS-2 one-class", m_oc), ("CPS-2 supervised", m_clean),
-                  ("CPS-2 + aug (unseen components)" if _is_attack(kind) else "CPS-2 + aug", aug_model(kind if _is_attack(kind) else None))]
+        models = [("CPS-2 one-class", m_oc), ("CPS-2 supervised", m_clean)]
         if _is_attack(kind):
-            models.append(("CPS-2 + aug (attack seen)", aug_model(None)))      # a defender who trained on this attack kind
+            models += [(AUG_COLS[m], aug_model(m, kind)) for m in ("seen", "combination", "components")]
+        else:
+            models.append(("CPS-2 + aug", aug_model("seen")))
         for name, model in models:
-            a, b = N.assign(s=model.score(N)), P.assign(s=model.score(P))
-            row[name] = _fmt(auc_ci(a, b, "s"))
+            row[name] = _fmt(auc_ci(N.assign(s=model.score(N)), P.assign(s=model.score(P)), "s"))
         rows.append(row)
     main = pd.DataFrame(rows)
 
@@ -214,6 +238,110 @@ def physics_tables(pf: pd.DataFrame, sw: pd.DataFrame) -> dict[str, pd.DataFrame
             r[c] = round(_roc_auc((d.cell == c).astype(int), d[ft].fillna(d[ft].median())), 3)
         f_rows.append(r)
     return {"cps2_main": main, "cps2_families": fams, "cps2_transfer": transfer, "cps2_features": pd.DataFrame(f_rows)}
+
+
+def cv_table(pf: pd.DataFrame, n_folds: int = 5) -> pd.DataFrame:
+    """Pre-specified (nothing tuned) scene-grouped K-fold cross-validation over ALL scenes: each scene's clips are scored by a model
+    that never saw that scene. Same settings and defender protocols as the held-out table, with ~3x the sample."""
+    pf = pf.reset_index(drop=True)
+    fold = pf.scene.map(lambda sc: zlib.crc32(sc.encode()) % n_folds).to_numpy()
+    attacks, pairs = _settings(pf)
+    specs = [("none", None, False), ("seen", None, True)]
+    for k in attacks:
+        specs += [("combination", k, True), ("components", k, True)]
+    scores = {sp: np.full(len(pf), np.nan) for sp in specs}
+    for f in range(n_folds):
+        train, idx = pf[fold != f], np.where(fold == f)[0]
+        te = pf.iloc[idx]
+        for sp in specs:
+            d, y = _train_set(train, sp[2], _train_kinds(attacks, sp[0], sp[1]))
+            if len(np.unique(y)) == 2:
+                scores[sp][idx] = physics.PhysicsClassifier().fit(d, y).score(te)
+    rows = []
+    for neg, pos, label, kind in pairs:
+        N, P = _pair_frames(pf, neg, pos, label, kind)
+        if len(P) < 5 or len(N) < 5:
+            continue
+
+        def auc_for(sp):
+            return _fmt(auc_ci(N.assign(s=scores[sp][N.index]), P.assign(s=scores[sp][P.index]), "s", n_boot=200))
+
+        row = {"pair": f"{neg} vs {pos}", "setting": label, "n_pos": len(P), "CPS-2 supervised": auc_for(("none", None, False))}
+        if _is_attack(kind):
+            row[AUG_COLS["seen"]] = auc_for(("seen", None, True))
+            row[AUG_COLS["combination"]] = auc_for(("combination", kind, True))
+            row[AUG_COLS["components"]] = auc_for(("components", kind, True))
+        else:
+            row["CPS-2 + aug"] = auc_for(("seen", None, True))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ----------------------------------------------------------------------------- paper tables
+def _tex_num(s) -> str:
+    import re
+    if not isinstance(s, str):
+        return "--"
+    m = re.match(r"([0-9.]+) \[([0-9.]+),([0-9.]+)\]", s)
+    return f"{float(m[1]):.2f}" + r"{\,\scriptsize[" + f"{m[2]},{m[3]}" + "]}" if m else "--"
+
+
+_SETTING = {"clean": "clean", "crf23": "CRF 23", "crf28": "CRF 28", "crf35": "CRF 35", "blurcal": "blur", "noiseadapt": "noise",
+            "aeadapt": "exposure jitter", "blurcal+noiseadapt": "blur + noise", "blurcal+noiseadapt+aeadapt": "blur + noise + exposure"}
+
+
+def _row_name(pair: str, setting: str) -> str:
+    fake = pair.split(" vs ")[1].split("@")[0]
+    who = {"GR": "Generated world", "RR": "Real-scene render", "GRs": "Generated, 3x supersampled", "RRs": "Real-scene, 3x supersampled"}.get(fake, fake)
+    if setting.startswith("same scenes"):
+        return f"{who} (control scenes)"
+    return f"{who}, {_SETTING.get(setting, 'supersampled' if setting.startswith('supersampled') else setting)}"
+
+
+def _tex_table(df: pd.DataFrame, cols: dict, caption: str, label: str) -> str:
+    out = [r"\begin{table}[t]", r"\centering", r"\small", r"\begin{tabular}{l" + "c" * len(cols) + "}", r"\toprule",
+           " & ".join(["Setting"] + list(cols.values())) + r" \\", r"\midrule"]
+    for _, r in df.iterrows():
+        out.append(" & ".join([_row_name(r["pair"], r["setting"])] + [_tex_num(r.get(c)) for c in cols]) + r" \\")
+    out += [r"\bottomrule", r"\end{tabular}", f"\\caption{{{caption}}}", f"\\label{{{label}}}", r"\end{table}", ""]
+    return "\n".join(out)
+
+
+def write_latex(tables: dict[str, pd.DataFrame], path) -> None:
+    """booktabs tables for the paper (AUC with 95% scene-bootstrap CI). Needs \\usepackage{booktabs}."""
+    parts = ["% generated by c44.analysis.write_latex; requires \\usepackage{booktabs}\n"]
+    if "cps2_main" in tables and len(tables["cps2_main"]):
+        m = tables["cps2_main"]
+        base = m[~m.setting.map(analysis_is_attack_label)]
+        parts.append(_tex_table(base, {"univfd": "UnivFD", "npr": "NPR", "consistency": "Consistency", "CPS-1 (one-class)": "CPS-1",
+                                       "CPS-2 one-class": "CPS-2 (one-class)", "CPS-2 supervised": "CPS-2"},
+                                "Real vs. fake AUC on held-out scenes: clean, recompressed and resolution-control settings.", "tab:main"))
+        att = m[m.setting.map(analysis_is_attack_label)]
+        if len(att):
+            parts.append(_tex_table(att, {"univfd": "UnivFD", "CPS-2 supervised": "CPS-2", AUG_COLS["seen"]: "+aug (seen)",
+                                          AUG_COLS["combination"]: "+aug (new combo.)", AUG_COLS["components"]: "+aug (new comp.)"},
+                                    "Camera-aware attacks on held-out scenes. +aug: CPS-2 trained with attacks; the attack is seen, a new "
+                                    "combination of seen components, or built from components never seen.", "tab:attacks"))
+    if "cps2_cv" in tables and len(tables["cps2_cv"]):
+        c = tables["cps2_cv"]
+        att = c[c.setting.map(analysis_is_attack_label)]
+        if len(att):
+            parts.append(_tex_table(att, {"CPS-2 supervised": "CPS-2", AUG_COLS["seen"]: "+aug (seen)", AUG_COLS["combination"]: "+aug (new combo.)",
+                                          AUG_COLS["components"]: "+aug (new comp.)"},
+                                    "Attacks, scene-grouped 5-fold cross-validation over all scenes (larger sample).", "tab:attacks-cv"))
+    if "cps2_families" in tables and len(tables["cps2_families"]):
+        f = tables["cps2_families"]
+        lines = [r"\begin{table}[t]", r"\centering", r"\small", r"\begin{tabular}{lcccc}", r"\toprule",
+                 r"Features & GR & RR & GR supersampled & RR supersampled \\", r"\midrule"]
+        for _, r in f.iterrows():
+            lines.append(" & ".join([str(r["features"]).replace("&", r"\&")] + [_tex_num(r.get(k)) for k in ("GR", "RR", "GRs", "RRs")]) + r" \\")
+        lines += [r"\bottomrule", r"\end{tabular}", r"\caption{Which cue family carries the signal (held-out scenes).}", r"\label{tab:families}", r"\end{table}", ""]
+        parts.append("\n".join(lines))
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
+def analysis_is_attack_label(setting: str) -> bool:
+    return _is_attack(setting) and not setting.startswith(("same scenes", "supersampled")) and setting != "clean"
 
 
 def attack_calibration(pf: pd.DataFrame) -> pd.DataFrame:
@@ -270,15 +398,29 @@ def run(store=None) -> str:
     if err:
         text.append(err)
     titles = {"cps2_main": "1. every detector vs. real, test scenes (AUC, higher score = fake)",
-              "cps2_families": "2. which cue family carries the signal (clean-trained CPS-2, test scenes)",
-              "cps2_transfer": "3. transfer between fake types (test scenes)",
-              "cps2_features": "4. single-feature AUC on dev scenes (<0.5: lower in fakes)"}
-    for name, title in titles.items():
+              "cps2_families": "3. which cue family carries the signal (clean-trained CPS-2, test scenes)",
+              "cps2_transfer": "4. transfer between fake types (test scenes)",
+              "cps2_features": "5. single-feature AUC on dev scenes (<0.5: lower in fakes)"}
+    for name in ("cps2_main",):
         if name in tables:
-            section(title, name, lambda n=name: tables[n])
-    section("5. attack calibration (attacked / paired real clip)", "attack_calibration",
+            section(titles[name], name, lambda n=name: tables[n])
+    if len(pf):
+        def _cv():
+            tables["cps2_cv"] = cv_table(pf)
+            return tables["cps2_cv"]
+        section("2. pre-specified 5-fold scene-grouped CV over ALL scenes (same settings, ~3x the sample)", "cps2_cv", _cv)
+    for name in ("cps2_families", "cps2_transfer", "cps2_features"):
+        if name in tables:
+            section(titles[name], name, lambda n=name: tables[n])
+    section("6. attack calibration (attacked / paired real clip; 1.0 = matched)", "attack_calibration",
             lambda: attack_calibration(pf) if len(pf) else pd.DataFrame())
-    section("6. generic detectors and CPS-1 on all scenes", "detectors", lambda: detectors_table(sw))
+    section("7. generic detectors and CPS-1 on all scenes", "detectors", lambda: detectors_table(sw))
+    if tables:
+        try:
+            write_latex(tables, out / "tables.tex")
+            files.append(out / "tables.tex")
+        except Exception as e:                                          # noqa: BLE001
+            text.append(f"## LaTeX tables\n\nSKIPPED: {e!r}\n")
     summary = "\n".join(text)
     (out / "summary.md").write_text(summary, encoding="utf-8")
     files.append(out / "summary.md")

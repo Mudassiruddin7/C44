@@ -546,18 +546,68 @@ def blur_exposure(n: int = 12, grid=(0.05, 0.1, 0.2, 0.3, 0.5), log: Log = print
     return best
 
 
-def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = None, log: Log = print,
-                   limit_scenes: int | None = None) -> list[str]:
-    """Derived cells '<cell>@<kind>' (e.g. RC@crf28, GR@blur): recompression for every cell, camera-simulating
-    attacks (motion blur along the measured motion; sensor noise with PRNU, level matched to the paired real clip)
-    for render cells. Geometry is reused from the parent clip, since camera motion is unchanged. Attacks run on the
-    first `limit_scenes` scenes only (they are expensive)."""
+def calibrate_exposure_jitter(frames: np.ndarray, gm: float, wm: float, seed: int, iters: int = 2) -> tuple[float, float]:
+    """Jitter sigmas (log gain, red/blue balance) at which the attacked clip's MEASURED exposure / white-balance jitter equals
+    the real clip's. The first guess (sigma = target) under-shoots by ~30% because the estimator attenuates the injected walk,
+    so measure and rescale (each step bounded to 0.25x-4x)."""
+    from . import attacks, physics
+    sg = gm if np.isfinite(gm) else 0.0
+    sw = wm if np.isfinite(wm) else 0.0
+    for _ in range(iters):
+        g2, w2 = physics.gain_targets(attacks.exposure_jitter(frames, sg, sw, seed))
+        if np.isfinite(g2) and g2 > 1e-6 and sg > 0:
+            sg *= float(np.clip(gm / g2, 0.25, 4.0))
+        if np.isfinite(w2) and w2 > 1e-6 and sw > 0:
+            sw *= float(np.clip(wm / w2, 0.25, 4.0))
+    return sg, sw
+
+
+def _variant_worker(job: dict) -> dict:
+    """One derived clip (runs in a worker process; CPU only). Returns {'cid', 'extra'} or {'cid', 'error'}."""
     from . import attacks, cps, physics
+    cid = job["cid"]
+    try:
+        frames = video.read_video(job["src"])
+        op, extra = job["op"], {}
+        if op == "compress":
+            video.write_mp4(frames, job["out"], SPEC.fps, crf=int(job["param"]), preset=SPEC.preset)
+            return {"cid": cid, "extra": extra}
+        seed = zlib.crc32(cid.encode())
+        if "blurcal" in op:
+            mo = geometry.motion(geometry.Geometry.load(job["meta"]))
+            d = np.where(np.isfinite(mo["direction"]), mo["direction"], [1.0, 0.0])
+            m = np.where(np.isfinite(mo["m"]), mo["m"], 0.0)
+            frames = attacks.motion_blur(frames, m, d, exposure=job["exposure"])
+        if "noiseadapt" in op:
+            target = cps.resid_level(video.read_video(job["parent_src"])[2:CAL_FRAMES])
+            strength, got = calibrate_noise_strength(lambda s: attacks.scaled_noise(frames[:CAL_FRAMES], s, seed), target)
+            frames = attacks.scaled_noise(frames, strength, seed)
+            extra = {"noise_strength": strength, "resid_target": target, "resid_got": got}
+        if "aeadapt" in op:
+            gm, wm = physics.gain_targets(video.read_video(job["parent_src"]))
+            sg, sw = calibrate_exposure_jitter(frames, gm, wm, seed + 1)
+            frames = attacks.exposure_jitter(frames, sg, sw, seed + 1)
+            extra = {**extra, "gain_target": gm, "wb_target": wm, "gain_sigma": sg, "wb_sigma": sw}
+        video.write_mp4(frames, job["out"], SPEC.fps, SPEC.crf, SPEC.preset)
+        return {"cid": cid, "extra": extra}
+    except Exception as e:                                          # noqa: BLE001
+        return {"cid": cid, "error": f"{e!r} @ {_where(e)}"}
+
+
+def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = None, log: Log = print,
+                   limit_scenes: int | None = None, n_jobs: int | None = None) -> list[str]:
+    """Derived cells '<cell>@<kind>' (e.g. RC@crf28, GR@blurcal): recompression for every cell, camera-simulating
+    attacks (motion blur along the measured motion; sensor noise with PRNU, level matched to the paired real clip;
+    exposure / white-balance jitter matched to it) for render cells. Geometry is reused from the parent clip, since camera
+    motion is unchanged. Attacks run on the first `limit_scenes` scenes. Clips are made in parallel (CPU only)."""
+    import os
+    from multiprocessing import Pool
     op, param = VARIANTS[kind]
-    made = []
     done = _finished_parents()
     keep = subset_scenes(limit_scenes) if (limit_scenes and op != "compress") else None
     allc = manifest().load()
+    exposure = blur_exposure(log=log) if "blurcal" in op else None          # calibrated once, before the workers start
+    jobs, clips = [], {}
     for cell in cells:
         if op != "compress" and cell == "RC":
             continue
@@ -566,35 +616,33 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
             if (vcell, c.clip_id) in done or (keep is not None and c.scene not in keep):
                 continue
             cid = f"{c.clip_id}@{kind}"
-            frames = video.read_video(_abs(c.path))
-            out = config.clip_path(vcell, cid)
-            extra = {}
-            if op == "compress":
-                video.write_mp4(frames, out, SPEC.fps, crf=int(param), preset=SPEC.preset)
-            else:
-                m, d = _motion_dir(cell, c)
-                rc = allc[c.parent]
-                if "blurcal" in op:
-                    frames = attacks.motion_blur(frames, m, d, exposure=blur_exposure(log=log))
-                if "noiseadapt" in op:
-                    seed = zlib.crc32(cid.encode())
-                    target = cps.resid_level(video.read_video(_abs(rc.path))[2:CAL_FRAMES])
-                    strength, got = calibrate_noise_strength(
-                        lambda s: attacks.scaled_noise(frames[:CAL_FRAMES], s, seed), target)
-                    frames = attacks.scaled_noise(frames, strength, seed)
-                    extra = {"noise_strength": strength, "resid_target": target, "resid_got": got}
-                if "aeadapt" in op:
-                    gm, wm = physics.gain_targets(video.read_video(_abs(rc.path)))
-                    frames = attacks.exposure_jitter(frames, gm if np.isfinite(gm) else 0.0,
-                                                     wm if np.isfinite(wm) else 0.0, zlib.crc32(cid.encode()) + 1)
-                    extra = {**extra, "gain_target": gm, "wb_target": wm}
-                video.write_mp4(frames, out, SPEC.fps, SPEC.crf, SPEC.preset)
-            shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, cid))
-            manifest().add(Clip(cid, vcell, c.scene, _rel(out), c.n_frames, c.fps, c.width, c.height,
-                                generator=c.generator, parent=c.clip_id, meta={"variant": kind, **extra}))
-            if store is not None:
-                store.stage(out)
-            made.append(cid)
+            clips[cid] = (cell, vcell, c)
+            jobs.append({"cid": cid, "op": op, "param": param, "exposure": exposure, "src": str(_abs(c.path)),
+                         "parent_src": str(_abs(allc[c.parent].path)) if c.parent in allc else "",
+                         "meta": str(config.meta_path(cell, c.clip_id)), "out": str(config.clip_path(vcell, cid))})
+    results = []
+    if jobs:
+        n = n_jobs or max(1, (os.cpu_count() or 2) - 1)
+        if n <= 1 or len(jobs) <= 1:
+            results = [_variant_worker(j) for j in jobs]
+        else:
+            with Pool(min(n, len(jobs)), initializer=_phys_init) as pool:
+                for k, r in enumerate(pool.imap_unordered(_variant_worker, jobs, chunksize=2), 1):
+                    results.append(r)
+                    if k % 100 == 0:
+                        log(f"[variants] {kind}: {k}/{len(jobs)}")
+    made = []
+    for r in results:
+        if "error" in r:
+            log(f"[variants] {r['cid']} failed: {r['error']}")
+            continue
+        cell, vcell, c = clips[r["cid"]]
+        shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, r["cid"]))
+        manifest().add(Clip(r["cid"], vcell, c.scene, _rel(config.clip_path(vcell, r["cid"])), c.n_frames, c.fps, c.width,
+                            c.height, generator=c.generator, parent=c.clip_id, meta={"variant": kind, **r["extra"]}))
+        if store is not None:
+            store.stage(config.clip_path(vcell, r["cid"]))
+        made.append(r["cid"])
     log(f"[variants] {kind}: {len(made)} clips")
     _flush(store, msg=f"c44: variants {kind}")
     return made
