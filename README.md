@@ -9,7 +9,9 @@ Benchmark build and evaluation code (CVPR 2027 idea C44). The design is a 2×2 b
 | GR | generated | 3DGS render | FlashWorld, conditioned on RC's first frame, caption and camera path; rendered along that path, played at a speed calibrated so its image motion matches RC |
 | GV | generated | video diffusion | Wan2.2-TI2V image-to-video (reference cell, **experimental**, not part of the notebook) |
 
-Detectors compared: UnivFD, NPR, a multi-view reprojection-consistency detector (a re-implementation of the criterion GenWorld builds on), a one-class **capture-physics score** (CPS, `c44/cps.py`) and a supervised classifier on the same 8 physics features. Evaluation is by AUC with scene-level bootstrap CIs; every learned model is cross-validated with folds split **by scene**.
+Detectors compared: UnivFD, NPR, a multi-view reprojection-consistency detector (a re-implementation of the criterion GenWorld builds on), **CPS-1** (a one-class capture-physics score on 8 VGGT-motion-based features, `c44/cps.py`) and **CPS-2**, the proposed detector (`c44/physics.py`): 23 image-formation cues of a physical camera measured from the pixels alone (optical-flow motion, no depth model), in a supervised and a one-class form. The cues that a renderer lacks by construction: auto-exposure / white-balance dynamics (motion-compensated frame-to-frame gain jitter), temporal vs. spatial noise statistics, noise whiteness and chroma noise, noise-free patches, power-spectrum shape, edge acutance, and blur-motion coupling.
+
+**Protocol.** Scenes are split once by a hash into dev (70%) and held-out test (30%); no design decision uses the test scenes. Models train on dev scenes only; AUCs are on test scenes with scene-level bootstrap CIs. The "aug" variant of CPS-2 trains on recompressed and attacked fakes and, for each attack, on all the *other* attack kinds (leave-one-attack-out).
 
 ## Run it (one notebook)
 
@@ -25,15 +27,16 @@ The notebook downloads this repository's code from GitHub on every run, so fixin
 | 1–2 | `check`, `setup` | environment report; VGGT, NPR, FlashWorld, a CUDA 13.0 toolkit matched to torch, gsplat compiled for sm_120 | ~10 min per session |
 | 3 | smoke test + `rc`, `captions`, `gr`, `rr` | one scene through every component first (fails fast with all errors listed), then the full build; resumes from the HF repo | RC 133 min, captions 5, GR 38, RR 165 |
 | 4 | `evaluate` | UnivFD, NPR, consistency, CPS, report | 17 min |
-| 5 | `robust` | recompression (CRF 23/28/35) and camera-aware attacks (calibrated blur, noise matched per clip to its real pair) | ~1–2 h |
+| 5 | `robust` | recompression (CRF 23/28/35) and camera-aware attacks: calibrated blur, noise matched per clip to its real pair, and an attacker who also fakes exposure / white-balance jitter at the real clip's level | ~1–2 h |
 | 6 | `control` | GR/RR re-rendered at 3× and area-downscaled (resolution/resampling control) on a scene subset | 60 min |
-| 7 | `analyse` | final tables in `results/analysis/` (see `c44/analysis.py`) and the results zip | 3 min |
+| 7 | `physics` | CPS-2 features of every clip, parallel over CPU cores | ~10–15 min |
+| 8 | `analyse` | final tables in `results/analysis/` (see `c44/analysis.py`) and the results zip | few min |
 
 Every GPU stage runs in a fresh subprocess (`python -m c44 <stage>`), so each is also usable from a terminal and is resumable (finished clips are skipped, errored ones retried). molab limits: sessions last 12 h, notebooks stop after 90 idle minutes, and files are not kept, so use the HF repo for long runs.
 
 ```
 python -m c44 setup | pull | rc --n 150 | captions | gr | rr | detect | features | cps | evaluate
-python -m c44 robust --n 75 | control --n 40 | analyse | report
+python -m c44 robust --n 75 | control --n 40 | physics | analyse | report
 python -m c44 gv --limit 150        # experimental video-diffusion cell
 ```
 
@@ -50,15 +53,16 @@ c44/
   gs_render.py      gsplat rasteriser wrapper
   flashworld_gen.py FlashWorld wrapper;  gen_video.py  Wan wrapper (experimental)
   vlm.py            Qwen2.5-VL captions (FlashWorld prompts)
-  cps.py            capture-physics features and the one-class score
-  attacks.py        motion blur and sensor-noise attacks
+  cps.py            CPS-1: first-generation capture-physics features and one-class score
+  physics.py        CPS-2: 23 pixel-only camera cues, supervised and one-class detectors
+  attacks.py        motion blur, sensor-noise and exposure-jitter attacks
   detectors/        UnivFD, NPR, reprojection consistency, VLM judge
   pipeline.py       build and evaluation stages (resumable)
-  analysis.py       final tables and supervised physics score
+  analysis.py       final tables (held-out scenes): detectors, CPS-2, cue families, transfer, attacks, control
   metrics.py        AUC, bootstrap CIs
   manifest.py, storage.py   clip bookkeeping; optional Hugging Face persistence
   setup_env.py, molab.py, cli.py   environment setup, notebook stages, command line
-tests/              33 CPU tests with fake GPU components (no GPU, network or data needed)
+tests/              38 CPU tests with fake GPU components (no GPU, network or data needed)
 docs/molab-notes.md what had to be worked around on molab / Blackwell, and why
 ```
 

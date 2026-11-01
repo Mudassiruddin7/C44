@@ -20,7 +20,7 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v14-noise-fix"
+VERSION = "v15-cps2"
 ATTACK_N = 75      # scenes for the (expensive) calibrated attacks
 CONTROL_N = 40     # scenes for the supersampled-render resolution control
 
@@ -185,6 +185,9 @@ def run(stage: str, n_scenes: int | None = None):
     if stage == "control":
         _need(["control", "--n", str(min(n_scenes or CONTROL_N, CONTROL_N))])
         return None
+    if stage == "physics":
+        _need(["physics"])
+        return None
     if stage == "analyse":
         _need(["analyse"])
         res = config.work_dir() / "results"
@@ -200,4 +203,4 @@ def run(stage: str, n_scenes: int | None = None):
         print(f"results saved to {zip_path} - download it from the file browser before the session ends")
         print(pd.read_csv(res / "feature_auc.csv").round(3).to_string(index=False))
         return pd.read_csv(res / "report.csv").round(3)
-    raise ValueError("stage must be check, setup, smoke, pilot, evaluate, robust, control, analyse or full")
+    raise ValueError("stage must be check, setup, smoke, pilot, evaluate, robust, control, physics, analyse or full")

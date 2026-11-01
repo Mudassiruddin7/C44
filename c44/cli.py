@@ -33,10 +33,15 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("control", help="supersampled GR/RR renders (resolution control), rescored")
     s.add_argument("--n", type=int, default=40)
     s.add_argument("--ss", type=int, default=3)
+    sub.add_parser("physics", help="CPS-2 physics features of every clip (CPU, parallel)")
     sub.add_parser("analyse", help="final tables: detectors, supervised physics score, attacks, control")
     sub.add_parser("report", help="metrics table")
     a = p.parse_args(argv)
 
+    if a.cmd == "physics":                                # one BLAS/OpenMP thread per worker process
+        import os
+        for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            os.environ[v] = "1"
     from . import pipeline, setup_env
     from .storage import Store
     store = Store()
@@ -52,7 +57,8 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "pull":
         # the manifest, tables, base clips and geometry; not the thousands of recompression/attack variant clips
         print(store.pull(["manifest.jsonl", "captions.json", "results/*", "meta/RC/*", "meta/GR/*", "meta/RR/*",
-                          "clips/RC/*", "clips/GR/*", "clips/RR/*"]))
+                          "clips/RC/*", "clips/GR/*", "clips/RR/*", "clips/GRs/*", "clips/RRs/*",
+                          "clips/*@crf*/*", "clips/*@blurcal*/*", "clips/*@noiseadapt*/*", "clips/*@aeadapt*/*"]))
     elif a.cmd == "rc":
         store.ensure_repo()
         pipeline.build_rc(a.n, a.seed, store)
@@ -95,6 +101,9 @@ def main(argv: list[str] | None = None) -> None:
         pipeline.run_cps(n_folds=0 if n_rc < 30 else 5, min_train=4 if n_rc < 30 else 10, store=store)
         pipeline.report(n_boot=500)
         pipeline.feature_auc().to_csv(pipeline.results_dir() / "feature_auc.csv", index=False)
+    elif a.cmd == "physics":
+        df = pipeline.physics_features(store=store)
+        print(f"{len(df)} clips with physics features")
     elif a.cmd == "analyse":
         from . import analysis
         print(analysis.run(store=store))

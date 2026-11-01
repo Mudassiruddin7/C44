@@ -35,6 +35,17 @@ def motion_blur(frames: np.ndarray, m: np.ndarray, direction: np.ndarray, exposu
     return out
 
 
+def exposure_jitter(frames: np.ndarray, gain_sigma: float, wb_sigma: float, seed: int = 0) -> np.ndarray:
+    """Fake auto-exposure / auto-white-balance: a random walk of the global gain (log step std `gain_sigma`) and of the
+    red/blue balance (`wb_sigma`). An attacker who knows the CPS exposure cue sets the sigmas to the real clip's level."""
+    rng = np.random.default_rng(seed)
+    T = len(frames)
+    g = np.concatenate([[0.0], np.cumsum(rng.normal(0.0, gain_sigma, T - 1))])
+    w = np.concatenate([[0.0], np.cumsum(rng.normal(0.0, wb_sigma, T - 1))])
+    gains = np.exp(np.stack([g + w / 2, g, g - w / 2], axis=1))[:, None, None, :]
+    return np.clip(frames.astype(np.float32) * gains + 0.5, 0, 255).astype(np.uint8)
+
+
 def scaled_noise(frames: np.ndarray, strength: float, seed: int = 0) -> np.ndarray:
     """Sensor noise whose whole model scales together: shot, read and fixed-pattern variances are all proportional to
     `strength` (1.0 = the default sensor_noise). Scaling only the shot-noise gain leaves a read-noise/PRNU floor that is

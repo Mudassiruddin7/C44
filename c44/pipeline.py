@@ -476,6 +476,8 @@ VARIANTS = {
     # Retired: fixed-parameter "blur"/"noise"/"blur+noise" (overshot) and "noisecal"/"blurcal+noisecal" (calibrated only
     # the shot-noise gain, so a read-noise floor kept 117/288 clips at 1.3-1.7x the real noise level).
     "blurcal": ("blurcal", None), "noiseadapt": ("noiseadapt", None), "blurcal+noiseadapt": ("blurcal+noiseadapt", None),
+    # attacker who also knows the auto-exposure cue: fakes exposure / white-balance jitter at the paired real clip's level
+    "aeadapt": ("aeadapt", None), "blurcal+noiseadapt+aeadapt": ("blurcal+noiseadapt+aeadapt", None),
 }
 CAL_FRAMES = 12
 
@@ -483,11 +485,16 @@ CAL_FRAMES = 12
 def _rt_resid(frames: np.ndarray) -> float:
     """resid_level of a short clip after an H.264 round trip at the benchmark CRF (what the final clip will show)."""
     from . import cps
-    tmp = results_dir() / "_cal.mp4"
-    video.write_mp4(frames, tmp, SPEC.fps, SPEC.crf, "veryfast")
-    out = cps.resid_level(video.read_video(tmp)[2:])
-    tmp.unlink(missing_ok=True)
-    return out
+    import os
+    import tempfile
+    fd, name = tempfile.mkstemp(suffix=".mp4", dir=results_dir())          # unique: safe with parallel workers
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        video.write_mp4(frames, tmp, SPEC.fps, SPEC.crf, SPEC.preset)       # the final preset: a faster one keeps ~15% less noise
+        return cps.resid_level(video.read_video(tmp)[2:])
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def calibrate_noise_strength(noisy: Callable[[float], np.ndarray], target: float, s_lo: float = 1e-3,
@@ -545,7 +552,7 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
     attacks (motion blur along the measured motion; sensor noise with PRNU, level matched to the paired real clip)
     for render cells. Geometry is reused from the parent clip, since camera motion is unchanged. Attacks run on the
     first `limit_scenes` scenes only (they are expensive)."""
-    from . import attacks, cps
+    from . import attacks, cps, physics
     op, param = VARIANTS[kind]
     made = []
     done = _finished_parents()
@@ -566,16 +573,21 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
                 video.write_mp4(frames, out, SPEC.fps, crf=int(param), preset=SPEC.preset)
             else:
                 m, d = _motion_dir(cell, c)
+                rc = allc[c.parent]
                 if "blurcal" in op:
                     frames = attacks.motion_blur(frames, m, d, exposure=blur_exposure(log=log))
                 if "noiseadapt" in op:
                     seed = zlib.crc32(cid.encode())
-                    rc = allc[c.parent]
                     target = cps.resid_level(video.read_video(_abs(rc.path))[2:CAL_FRAMES])
                     strength, got = calibrate_noise_strength(
                         lambda s: attacks.scaled_noise(frames[:CAL_FRAMES], s, seed), target)
                     frames = attacks.scaled_noise(frames, strength, seed)
                     extra = {"noise_strength": strength, "resid_target": target, "resid_got": got}
+                if "aeadapt" in op:
+                    gm, wm = physics.gain_targets(video.read_video(_abs(rc.path)))
+                    frames = attacks.exposure_jitter(frames, gm if np.isfinite(gm) else 0.0,
+                                                     wm if np.isfinite(wm) else 0.0, zlib.crc32(cid.encode()) + 1)
+                    extra = {**extra, "gain_target": gm, "wb_target": wm}
                 video.write_mp4(frames, out, SPEC.fps, SPEC.crf, SPEC.preset)
             shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, cid))
             manifest().add(Clip(cid, vcell, c.scene, _rel(out), c.n_frames, c.fps, c.width, c.height,
@@ -586,6 +598,45 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
     log(f"[variants] {kind}: {len(made)} clips")
     _flush(store, msg=f"c44: variants {kind}")
     return made
+
+
+def _phys_init() -> None:
+    import cv2
+    cv2.setNumThreads(1)                              # one thread per worker: no oversubscription
+
+
+def _phys_worker(job: tuple[str, str]) -> dict:
+    from . import physics
+    cid, path = job
+    try:
+        return {"clip_id": cid, **physics.clip_physics(video.read_video(path))}
+    except Exception as e:                                # noqa: BLE001
+        return {"clip_id": cid, "error": repr(e)}
+
+
+def physics_features(store: Store | None = None, log: Log = print, n_jobs: int | None = None) -> "object":
+    """CPS-2 features of every ok clip (parallel over clips, resumable, cached in results/physics_features.csv)."""
+    import os
+    import pandas as pd
+    from multiprocessing import Pool
+    out = results_dir() / "physics_features.csv"
+    df = pd.read_csv(out) if out.exists() else pd.DataFrame()
+    have = set(df.clip_id) if len(df) else set()
+    valid = lambda cell: "@" not in cell or cell.split("@")[1] in VARIANTS      # noqa: E731 - skip retired variants
+    jobs = [(c.clip_id, str(_abs(c.path))) for c in manifest().load().values()
+            if c.status == "ok" and valid(c.cell) and c.clip_id not in have and _abs(c.path).exists()]
+    log(f"[physics] {len(jobs)} clips to measure ({len(have)} cached)")
+    if jobs:
+        rows = []
+        with Pool(n_jobs or max(1, (os.cpu_count() or 2) - 1), initializer=_phys_init) as pool:
+            for k, row in enumerate(pool.imap_unordered(_phys_worker, jobs, chunksize=2), 1):
+                rows.append(row)
+                if k % 200 == 0 or k == len(jobs):
+                    log(f"[physics] {k}/{len(jobs)}")
+        df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+        df.to_csv(out, index=False)
+    _flush(store, [out], "c44: physics features")
+    return df
 
 
 def _finished_parents() -> set[tuple[str, str]]:
