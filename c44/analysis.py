@@ -5,7 +5,7 @@ Every CPS-2 model is trained on dev scenes only and evaluated on the test scenes
 bootstrap. Generic detectors (UnivFD, NPR, consistency) need no training and are scored on the same test scenes.
 
   cps2_main     test scenes: every detector vs. real, in every setting (clean, recompression, attacks, resolution control).
-                'aug' is trained with recompressed and attacked fakes; for an attack it is trained on all the OTHER attack kinds
+                'aug' is trained with recompressed and attacked fakes; for an attack, every attack sharing a component with it is left out
   cps2_families which cue family carries the signal (only / minus), on test scenes
   cps2_transfer train on one fake type, test on the other
   cps2_features single-feature AUC on dev scenes
@@ -126,9 +126,16 @@ def physics_tables(pf: pd.DataFrame, sw: pd.DataFrame) -> dict[str, pd.DataFrame
     m_clean = physics.PhysicsClassifier().fit(d0, y0)
     aug = {}
 
+    def parts(kind):
+        return set(kind.split("+")) if kind else set()
+
     def aug_model(exclude):
+        """Trained with recompressed and attacked fakes. For an evaluated attack, EVERY attack sharing a component with it
+        is left out ("blurcal+noiseadapt" removes blurcal, noiseadapt and every composite containing either), so the
+        attack's ingredients are genuinely unseen."""
         if exclude not in aug:
-            d, y = _train_set(dev, compress=True, attack_kinds=[a for a in attacks if a != exclude])
+            kinds = [a for a in attacks if not (parts(a) & parts(exclude))]
+            d, y = _train_set(dev, compress=True, attack_kinds=kinds)
             aug[exclude] = physics.PhysicsClassifier().fit(d, y)
         return aug[exclude]
 
@@ -159,7 +166,7 @@ def physics_tables(pf: pd.DataFrame, sw: pd.DataFrame) -> dict[str, pd.DataFrame
                 b = P.assign(s=base_scores[d].reindex(P.clip_id).to_numpy())
                 row[{"cps": "CPS-1 (one-class)"}.get(d, d)] = _fmt(auc_ci(a, b, "s"))
         models = [("CPS-2 one-class", m_oc), ("CPS-2 supervised", m_clean),
-                  ("CPS-2 + aug (unseen attack)" if _is_attack(kind) else "CPS-2 + aug", aug_model(kind if _is_attack(kind) else None))]
+                  ("CPS-2 + aug (unseen components)" if _is_attack(kind) else "CPS-2 + aug", aug_model(kind if _is_attack(kind) else None))]
         if _is_attack(kind):
             models.append(("CPS-2 + aug (attack seen)", aug_model(None)))      # a defender who trained on this attack kind
         for name, model in models:
@@ -220,7 +227,8 @@ def attack_calibration(pf: pd.DataFrame) -> pd.DataFrame:
         ref = rc.reindex(a.scene)
         r = {"cell": c, "n": len(a)}
         for ft, tag in (("resid_level", "noise level"), ("gain_mad", "exposure jitter"), ("wb_mad", "white-balance jitter")):
-            ratio = a[ft].to_numpy() / ref[ft].to_numpy()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = a[ft].to_numpy() / ref[ft].to_numpy()
             ratio = ratio[np.isfinite(ratio)]
             r[f"{tag} / real (median)"] = round(float(np.median(ratio)), 2) if len(ratio) else float("nan")
         rows.append(r)

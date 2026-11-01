@@ -11,7 +11,7 @@ Benchmark build and evaluation code (CVPR 2027 idea C44). The design is a 2×2 b
 
 Detectors compared: UnivFD, NPR, a multi-view reprojection-consistency detector (a re-implementation of the criterion GenWorld builds on), **CPS-1** (a one-class capture-physics score on 8 VGGT-motion-based features, `c44/cps.py`) and **CPS-2**, the proposed detector (`c44/physics.py`): 23 image-formation cues of a physical camera measured from the pixels alone (optical-flow motion, no depth model), in a supervised and a one-class form. The cues that a renderer lacks by construction: auto-exposure / white-balance dynamics (motion-compensated frame-to-frame gain jitter), temporal vs. spatial noise statistics, noise whiteness and chroma noise, noise-free patches, power-spectrum shape, edge acutance, and blur-motion coupling.
 
-**Protocol.** Scenes are split once by a hash into dev (70%) and held-out test (30%); no design decision uses the test scenes. Models train on dev scenes only; AUCs are on test scenes with scene-level bootstrap CIs. The "aug" variant of CPS-2 trains on recompressed and attacked fakes and, for each attack, on all the *other* attack kinds (leave-one-attack-out).
+**Protocol.** Scenes are split once by a hash into dev (70%) and held-out test (30%); no design decision uses the test scenes. Models train on dev scenes only; AUCs are on test scenes with scene-level bootstrap CIs. The "aug" variant of CPS-2 trains on recompressed and attacked fakes and, for each attack, on attacks that share no component (blur / noise / exposure jitter) with it, so its ingredients are genuinely unseen.
 
 ## Run it (one notebook)
 
