@@ -116,6 +116,16 @@ def _spearman(a: np.ndarray, b: np.ndarray) -> float:
     return float(spearmanr(a[ok], b[ok]).statistic)
 
 
+def resid_level(frames: np.ndarray) -> float:
+    """Median over frames of the noise-residual std in flat regions (the CPS `resid_level` feature, without the rest)."""
+    lv = []
+    for x in to_gray(frames):
+        r, mask = noise_residual(x)
+        if mask.sum() > 100:
+            lv.append(float(r[mask].std()))
+    return float(np.median(lv)) if lv else float("nan")
+
+
 def clip_features(frames: np.ndarray, m: np.ndarray, direction: np.ndarray | None = None,
                   flow_grid: np.ndarray | None = None, lag: int | None = None, min_shift_px: float = 5.0) -> dict:
     """CPS features of one clip. frames: uint8 [T,H,W,3]; m: per-frame image motion (px/frame) [T];

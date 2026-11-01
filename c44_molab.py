@@ -58,7 +58,8 @@ def _(mo):
 
 @app.cell
 def _(form, mo, molab, os):
-    # Runs everything automatically after the button: check -> setup -> smoke test -> build -> evaluate -> robustness.
+    # ONE cell runs everything after the button:
+    # check -> setup -> smoke test -> build -> evaluate -> robustness -> resolution control -> final analysis -> zip
     mo.stop(form.value is None, mo.md("Fill in the token and press **Start the whole pipeline**."))
     _v = form.value
     mo.stop(not _v["token"].strip(), mo.md("**The token is empty.** Paste it and press Start again."))
@@ -66,20 +67,33 @@ def _(form, mo, molab, os):
     if _v["repo"].strip():
         os.environ["C44_HF_REPO"] = _v["repo"].strip()
     _n = int(_v["n"])
-    print("=== 1/5 check ===")
+    print("=== 1/7 check ===")
     molab.run("check")
-    print("=== 2/5 setup (about 10 min) ===")
+    print("=== 2/7 setup (about 10 min) ===")
     molab.run("setup")
-    print(f"=== 3/5 smoke test + build {_n} scenes ===")
+    print(f"=== 3/7 smoke test + build {_n} scenes (resumes from the HF repo if there is one) ===")
     clips = molab.run("pilot", n_scenes=_n)
-    print(clips.to_string(index=False))
-    print("=== 4/5 evaluate ===")
-    results = molab.run("evaluate")
-    print(results.to_string(index=False))
-    print("=== 5/5 robustness (recompression + camera-simulating attacks) ===")
-    robust = molab.run("robust")
-    print("ALL DONE - download c44_results.zip from the file browser")
-    robust
+    print(clips.groupby(["cell", "status"]).size().to_string())
+    print("=== 4/7 evaluate ===")
+    print(molab.run("evaluate").to_string(index=False))
+    print("=== 5/7 robustness: recompression + calibrated blur/noise attacks ===")
+    molab.run("robust", n_scenes=_n)
+    print("=== 6/7 resolution control: supersampled renders ===")
+    molab.run("control", n_scenes=_n)
+    print("=== 7/7 final analysis ===")
+    zip_path = molab.run("analyse")
+    print("ALL DONE - use the download button under this cell")
+    return (zip_path,)
+
+
+@app.cell
+def _(mo, zip_path):
+    mo.stop(zip_path is None)
+    _data = open(zip_path, "rb").read()
+    mo.vstack([
+        mo.md("### Done. Download the results (tables, analysis, scores, features)"),
+        mo.download(data=_data, filename="c44_results.zip", mimetype="application/zip", label="Download c44_results.zip"),
+    ])
     return
 
 

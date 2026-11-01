@@ -20,7 +20,9 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v12-scale-ready"
+VERSION = "v13-all-in-one"
+ATTACK_N = 75      # scenes for the (expensive) calibrated attacks
+CONTROL_N = 40     # scenes for the supersampled-render resolution control
 
 
 def _check_access() -> list[str]:
@@ -178,10 +180,18 @@ def run(stage: str, n_scenes: int | None = None):
         return _build(n_scenes or (6 if stage == "pilot" else 150))
     if stage == "robust":
         import pandas as pd
-        _need(["robust"])
-        zip_path = shutil.make_archive(str(Path.cwd() / "c44_results"), "zip", config.work_dir(), base_dir="results")
-        print(f"results (with robustness variants) saved to {zip_path}")
+        _need(["robust", "--n", str(min(n_scenes or ATTACK_N, ATTACK_N))])
         return pd.read_csv(config.work_dir() / "results" / "report.csv").round(3)
+    if stage == "control":
+        _need(["control", "--n", str(min(n_scenes or CONTROL_N, CONTROL_N))])
+        return None
+    if stage == "analyse":
+        _need(["analyse"])
+        res = config.work_dir() / "results"
+        print((res / "analysis" / "summary.md").read_text(encoding="utf-8"))
+        zip_path = shutil.make_archive(str(Path.cwd() / "c44_results"), "zip", config.work_dir(), base_dir="results")
+        print(f"all results saved to {zip_path} (also pushed to the HF repo when one is set)")
+        return zip_path
     if stage == "evaluate":
         import pandas as pd
         _need(["evaluate"])
@@ -190,4 +200,4 @@ def run(stage: str, n_scenes: int | None = None):
         print(f"results saved to {zip_path} - download it from the file browser before the session ends")
         print(pd.read_csv(res / "feature_auc.csv").round(3).to_string(index=False))
         return pd.read_csv(res / "report.csv").round(3)
-    raise ValueError("stage must be check, setup, smoke, pilot, evaluate, robust or full")
+    raise ValueError("stage must be check, setup, smoke, pilot, evaluate, robust, control, analyse or full")

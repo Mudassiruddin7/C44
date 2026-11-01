@@ -41,6 +41,13 @@ def crop_resize(img: np.ndarray, width: int, height: int) -> np.ndarray:
     return np.ascontiguousarray(img)
 
 
+def downscale(frames: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Area-filter downscale of [T,H,W,3] frames (what the real clips go through when 4K is shrunk to the spec)."""
+    if frames.shape[2] == width and frames.shape[1] == height:
+        return frames
+    return np.stack([cv2.resize(f, (width, height), interpolation=cv2.INTER_AREA) for f in frames])
+
+
 def crop_resize_K(K: np.ndarray, src_wh: tuple[int, int], dst_wh: tuple[int, int]) -> np.ndarray:
     """Intrinsics after crop_resize (pixel centres at integer coordinates, OpenCV convention)."""
     (w, h), (W, H) = src_wh, dst_wh

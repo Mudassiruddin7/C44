@@ -193,18 +193,33 @@ def calibrate_scale(measure: Callable[[float], float], target: float, tol: float
     return s, m
 
 
+def subset_scenes(n: int, need: tuple = ("RC",)) -> set[str]:
+    """First n scenes (sorted, deterministic) that have an ok clip in every cell of `need`."""
+    per = [{c.scene for c in manifest().by_cell(cell)} for cell in need]
+    return set(sorted(set.intersection(*per))[:n])
+
+
 def build_gr(fw, seed: int = 0, store: Store | None = None, log: Log = print, geo=None, limit: int | None = None,
-             batch: int = 10) -> list[str]:
-    """FlashWorld world per RC clip: first frame + 24 keyframes of its camera path; rendered along all 48 poses."""
+             batch: int = 10, cell: str = "GR", ss: int = 1, scenes: set[str] | None = None) -> list[str]:
+    """FlashWorld world per RC clip: first frame + 24 keyframes of its camera path; rendered along all 48 poses.
+
+    Control mode (ss > 1, cell e.g. "GRs"): re-generate the same world (same seed) and render it at ss x resolution,
+    then area-downscale like the real 4K frames, at the path speed already calibrated for the GR clip. Tests whether
+    detector signal comes from the render resolution/resampling rather than from how the video was formed."""
     caps_path = config.work_dir() / "captions.json"
     caps = json.loads(caps_path.read_text()) if caps_path.exists() else {}
     # GR clips built before motion calibration (no path_speed) are stale: regenerate them
-    done = {c.parent for c in manifest().load().values()
-            if c.cell == "GR" and c.status in ("ok", "qc_fail") and "path_speed" in c.meta}
-    todo = [c for c in manifest().by_cell("RC") if c.clip_id not in done][:limit]
+    allc = manifest().load()
+    done = {c.parent for c in allc.values()
+            if c.cell == cell and c.status in ("ok", "qc_fail") and (ss > 1 or "path_speed" in c.meta)}
+    todo = [c for c in manifest().by_cell("RC") if c.clip_id not in done and (scenes is None or c.scene in scenes)]
+    if ss > 1:                                    # control: only scenes whose calibrated GR clip exists
+        todo = [c for c in todo if allc.get(f"GR_{c.scene[:16]}") is not None
+                and "path_speed" in allc[f"GR_{c.scene[:16]}"].meta]
+    todo = todo[:limit]
     made = []
     for i, rc in enumerate(todo):
-        cid = f"GR_{rc.scene[:16]}"
+        cid = f"{cell}_{rc.scene[:16]}"
         try:
             frames = video.read_video(_abs(rc.path))
             g = geometry.Geometry.load(config.meta_path("RC", rc.clip_id))
@@ -223,43 +238,54 @@ def build_gr(fw, seed: int = 0, store: Store | None = None, log: Log = print, ge
 
             def render_at(s: float) -> float:
                 cam = cameras.to_fw_cam11(slow_path(c2w, s), K, SPEC.width, SPEC.height)
-                last["frames"], last["qc"] = fw.render_path(scene, ref, Tn, cam, SPEC.width, SPEC.height,
-                                                            SPEC.background)
+                hi, last["qc"] = fw.render_path(scene, ref, Tn, cam, SPEC.width * ss, SPEC.height * ss,
+                                                SPEC.background)
+                last["frames"] = video.downscale(hi, SPEC.width, SPEC.height)
                 return float(np.nanmedian(geometry.motion(geo(last["frames"]))["m"]))
 
-            path_speed, motion_gr = calibrate_scale(render_at, target)
+            if ss > 1:                            # control: reuse the speed calibrated for the plain GR clip
+                path_speed = float(allc[f"GR_{rc.scene[:16]}"].meta["path_speed"])
+                motion_gr = render_at(path_speed)
+            else:
+                path_speed, motion_gr = calibrate_scale(render_at, target)
             out_frames, qc = last["frames"], last["qc"]
             del scene
             cov = float(qc["coverage"].mean())
-            _add_clip("GR", cid, rc.scene, out_frames, geo, "flashworld", parent=rc.clip_id,
+            _add_clip(cell, cid, rc.scene, out_frames, geo, "flashworld", parent=rc.clip_id, ss=ss,
                       status="ok" if cov >= SPEC.min_coverage else "qc_fail", store=store, coverage=cov,
                       holes=float(qc["holes"].mean()), gen_seconds=secs, caption=text, T_norm=Tn, path_speed=path_speed,
                       motion_target=target, motion_before_encode=motion_gr)
             _drop_results(cid)
             made.append(cid)
-            log(f"[GR] {i + 1}/{len(todo)} {cid} coverage={cov:.3f} gen={secs:.1f}s "
+            log(f"[{cell}] {i + 1}/{len(todo)} {cid} coverage={cov:.3f} gen={secs:.1f}s "
                 f"path_speed={path_speed:.2f} motion {motion_gr:.2f} (RC {target:.2f})")
         except Exception as e:                    # noqa: BLE001
-            log(f"[GR] {rc.clip_id} failed: {_why(e)}")
-            _fail("GR", cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
+            log(f"[{cell}] {rc.clip_id} failed: {_why(e)}")
+            _fail(cell, cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
         if made and len(made) % batch == 0:
-            _flush(store, msg=f"c44: GR x{len(made)}")
-    _flush(store, msg="c44: GR")
+            _flush(store, msg=f"c44: {cell} x{len(made)}")
+    _flush(store, msg=f"c44: {cell}")
     return made
 
 
 # ----------------------------------------------------------------------------- RR
 def build_rr(seed: int = 0, store: Store | None = None, log: Log = print, geo=None, device: str = "cuda",
-             keep_gs: bool = False, batch: int = 10) -> list[str]:
+             keep_gs: bool = False, batch: int = 10, cell: str = "RR", ss: int = 1,
+             scenes: set[str] | None = None, limit: int | None = None) -> list[str]:
     """DL3DV 3DGS of the RC scene, rendered along its training-camera path resampled so that the per-frame image
     motion reproduces the RC clip's motion profile (VGGT); identical rasteriser settings to GR."""
     from . import gs_render
     index = dl3dv.build_index()
-    done = _finished("RR", "parent")
-    todo = [c for c in manifest().by_cell("RC") if c.clip_id not in done]
+    done = _finished(cell, "parent")
+    allc = manifest().load()
+    todo = [c for c in manifest().by_cell("RC") if c.clip_id not in done and (scenes is None or c.scene in scenes)]
+    if ss > 1:                                    # control: same camera path as the plain RR clip (stored start_key)
+        todo = [c for c in todo if allc.get(f"RR_{c.scene[:16]}") is not None
+                and "start_key" in allc[f"RR_{c.scene[:16]}"].meta]
+    todo = todo[:limit]
     made = []
     for i, rc in enumerate(todo):
-        cid = f"RR_{rc.scene[:16]}"
+        cid = f"{cell}_{rc.scene[:16]}"
         gs_dir = config.work_dir() / "gs" / rc.scene
         try:
             files = dl3dv.fetch_gs(rc.scene, index)
@@ -270,32 +296,41 @@ def build_rr(seed: int = 0, store: Store | None = None, log: Log = print, geo=No
             m = geometry.motion(geometry.Geometry.load(config.meta_path("RC", rc.clip_id)))["m"][:-1]
             m = np.where(np.isfinite(m), m, np.nanmedian(m))
             rng, path = np.random.default_rng([seed, i]), None
-            for start in rng.permutation(max(1, len(c2ws) - 2)):
+            starts = ([int(allc[f"RR_{rc.scene[:16]}"].meta["start_key"])] if ss > 1
+                      else rng.permutation(max(1, len(c2ws) - 2)))
+            for start in starts:
                 path = cameras.resample_by_profile(c2ws, K, SPEC.width, SPEC.height, depth, m, int(start))
                 if path is not None:
                     break
             if path is None:
-                _fail("RR", cid, rc.scene, "qc_fail", parent=rc.clip_id, reason="camera path too short for profile")
+                _fail(cell, cid, rc.scene, "qc_fail", parent=rc.clip_id, reason="camera path too short for profile")
                 continue
-            frames, qc = gs_render.render(gs_render.gs_to_torch(gs_np, device), path, K, SPEC.width, SPEC.height,
-                                          SPEC.background)
+            if ss > 1:
+                K_hi = video.crop_resize_K(cams[0]["K"], (cams[0]["width"], cams[0]["height"]),
+                                           (SPEC.width * ss, SPEC.height * ss))
+                hi, qc = gs_render.render(gs_render.gs_to_torch(gs_np, device), path, K_hi, SPEC.width * ss,
+                                          SPEC.height * ss, SPEC.background)
+                frames = video.downscale(hi, SPEC.width, SPEC.height)
+            else:
+                frames, qc = gs_render.render(gs_render.gs_to_torch(gs_np, device), path, K, SPEC.width,
+                                              SPEC.height, SPEC.background)
             cov = float(qc["coverage"].mean())
             geo = geo or geometry.VGGTGeometry()
-            _add_clip("RR", cid, rc.scene, frames, geo, "dl3dv-3dgs", parent=rc.clip_id,
+            _add_clip(cell, cid, rc.scene, frames, geo, "dl3dv-3dgs", parent=rc.clip_id, ss=ss,
                       status="ok" if cov >= SPEC.min_coverage else "qc_fail", store=store, coverage=cov,
                       holes=float(qc["holes"].mean()), start_key=int(start), scene_depth=depth)
             made.append(cid)
-            log(f"[RR] {i + 1}/{len(todo)} {cid} coverage={cov:.3f}")
+            log(f"[{cell}] {i + 1}/{len(todo)} {cid} coverage={cov:.3f}")
         except Exception as e:                    # noqa: BLE001
-            log(f"[RR] {rc.clip_id} failed: {_why(e)}")
-            _fail("RR", cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
+            log(f"[{cell}] {rc.clip_id} failed: {_why(e)}")
+            _fail(cell, cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
         finally:
             if not keep_gs:
                 shutil.rmtree(gs_dir, ignore_errors=True)
                 shutil.rmtree(config.work_dir() / "downloads" / "3DGS", ignore_errors=True)
         if made and len(made) % batch == 0:
-            _flush(store, msg=f"c44: RR x{len(made)}")
-    _flush(store, msg="c44: RR")
+            _flush(store, msg=f"c44: {cell} x{len(made)}")
+    _flush(store, msg=f"c44: {cell}")
     return made
 
 
@@ -436,42 +471,114 @@ def run_cps(n_folds: int = 5, seed: int = 0, store: Store | None = None, log: Lo
 # ----------------------------------------------------------------------------- robustness / adaptive attacks
 VARIANTS = {
     "crf23": ("compress", 23), "crf28": ("compress", 28), "crf35": ("compress", 35),
-    "blur": ("blur", 0.5), "noise": ("noise", 0.01), "blur+noise": ("blur+noise", 0.5),
+    # Camera-aware attackers. Blur exposure is calibrated once (blur_exposure) so that attacked renders reproduce the real
+    # clips' sharpness-vs-motion behaviour; noise gain is calibrated per clip to the paired real clip's noise level.
+    # The earlier fixed-parameter "blur"/"noise"/"blur+noise" variants overshot (the detectors then flagged the attack
+    # itself) and are retired.
+    "blurcal": ("blurcal", None), "noisecal": ("noisecal", None), "blurcal+noisecal": ("blurcal+noisecal", None),
 }
+CAL_FRAMES = 12
 
 
-def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = None, log: Log = print) -> list[str]:
+def _rt_resid(frames: np.ndarray) -> float:
+    """resid_level of a short clip after an H.264 round trip at the benchmark CRF (what the final clip will show)."""
+    from . import cps
+    tmp = results_dir() / "_cal.mp4"
+    video.write_mp4(frames, tmp, SPEC.fps, SPEC.crf, "veryfast")
+    out = cps.resid_level(video.read_video(tmp)[2:])
+    tmp.unlink(missing_ok=True)
+    return out
+
+
+def calibrate_noise_gain(noisy: Callable[[float], np.ndarray], target: float, g_lo: float = 1e-5,
+                         g0: float = 0.004, g_hi: float = 0.05) -> tuple[float, float]:
+    """Gain at which the encoded noisy clip's resid_level matches `target`. resid_level^2 is ~affine in the gain
+    (shot noise + fixed read noise), so fit it from two probes and solve; then one correction step.
+    Returns (gain, achieved resid_level)."""
+    r_lo, r0 = _rt_resid(noisy(g_lo)), _rt_resid(noisy(g0))
+    if not (np.isfinite(r_lo) and np.isfinite(r0) and np.isfinite(target)) or target * target <= r_lo * r_lo:
+        return g_lo, r_lo                          # already noisier than the real clip: add (almost) nothing
+    k = max((r0 * r0 - r_lo * r_lo) / (g0 - g_lo), 1e-12)
+    g = float(np.clip(g_lo + (target * target - r_lo * r_lo) / k, g_lo, g_hi))
+    r = _rt_resid(noisy(g))
+    if np.isfinite(r) and r > 1e-9 and abs(r / target - 1) > 0.05:      # one multiplicative correction
+        g = float(np.clip(g_lo + (g - g_lo) * (target * target - r_lo * r_lo) / max(r * r - r_lo * r_lo, 1e-12),
+                          g_lo, g_hi))
+        r = _rt_resid(noisy(g))
+    return g, r
+
+
+def _motion_dir(cell: str, clip: Clip) -> tuple[np.ndarray, np.ndarray]:
+    mo = geometry.motion(geometry.Geometry.load(config.meta_path(cell, clip.clip_id)))
+    d = np.where(np.isfinite(mo["direction"]), mo["direction"], [1.0, 0.0])
+    return np.where(np.isfinite(mo["m"]), mo["m"], 0.0), d
+
+
+def blur_exposure(n: int = 12, grid=(0.05, 0.1, 0.2, 0.3, 0.5), log: Log = print) -> float:
+    """Exposure (blur length / image motion) at which attacked renders reproduce the real clips' sharpness-vs-motion
+    behaviour: the grid value whose median `sharp_ratio` on n GR clips is closest to the real (RC) median."""
+    from . import attacks, cps
+    path = results_dir() / "blur_exposure.json"
+    if path.exists():
+        return float(json.loads(path.read_text())["exposure"])
+    feats = cps_features(cells=("RC",), log=lambda *_: None)
+    target = float(np.nanmedian(feats[feats.clip_id.str.match(r"^RC_[0-9a-f]+$")].sharp_ratio))
+    clips = manifest().by_cell("GR")[:n]
+    table = {}
+    for e in grid:
+        vals = []
+        for c in clips:
+            m, d = _motion_dir("GR", c)
+            fr = attacks.motion_blur(video.read_video(_abs(c.path)), m, d, exposure=e)
+            vals.append(cps.clip_features(fr, m, d)["sharp_ratio"])
+        table[e] = float(np.nanmedian(vals))
+    best = min(grid, key=lambda e: abs(table[e] - target) if np.isfinite(table[e]) else np.inf)
+    path.write_text(json.dumps({"exposure": best, "target_sharp_ratio": target, "median_by_exposure": table}))
+    log(f"[blur] calibrated exposure {best} (real sharp_ratio {target:.3f}; attacked {table})")
+    return best
+
+
+def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = None, log: Log = print,
+                   limit_scenes: int | None = None) -> list[str]:
     """Derived cells '<cell>@<kind>' (e.g. RC@crf28, GR@blur): recompression for every cell, camera-simulating
-    attacks (motion blur along the measured motion, sensor noise with PRNU) for render cells. Geometry is reused
-    from the parent clip, since camera motion is unchanged."""
-    from . import attacks
+    attacks (motion blur along the measured motion; sensor noise with PRNU, level matched to the paired real clip)
+    for render cells. Geometry is reused from the parent clip, since camera motion is unchanged. Attacks run on the
+    first `limit_scenes` scenes only (they are expensive)."""
+    from . import attacks, cps
     op, param = VARIANTS[kind]
     made = []
     done = _finished_parents()
+    keep = subset_scenes(limit_scenes) if (limit_scenes and op != "compress") else None
+    allc = manifest().load()
     for cell in cells:
         if op != "compress" and cell == "RC":
             continue
         vcell = f"{cell}@{kind}"
         for c in manifest().by_cell(cell):
-            if (vcell, c.clip_id) in done:
+            if (vcell, c.clip_id) in done or (keep is not None and c.scene not in keep):
                 continue
             cid = f"{c.clip_id}@{kind}"
             frames = video.read_video(_abs(c.path))
             out = config.clip_path(vcell, cid)
+            extra = {}
             if op == "compress":
                 video.write_mp4(frames, out, SPEC.fps, crf=int(param), preset=SPEC.preset)
             else:
-                mo = geometry.motion(geometry.Geometry.load(config.meta_path(cell, c.clip_id)))
-                d = np.where(np.isfinite(mo["direction"]), mo["direction"], [1.0, 0.0])
-                m = np.where(np.isfinite(mo["m"]), mo["m"], 0.0)
-                if "blur" in op:
-                    frames = attacks.motion_blur(frames, m, d, exposure=float(param))
-                if "noise" in op:
-                    frames = attacks.sensor_noise(frames, prnu_std=0.01, seed=zlib.crc32(cid.encode()))
+                m, d = _motion_dir(cell, c)
+                if "blurcal" in op:
+                    frames = attacks.motion_blur(frames, m, d, exposure=blur_exposure(log=log))
+                if "noisecal" in op:
+                    seed = zlib.crc32(cid.encode())
+                    rc = allc[c.parent]
+                    target = cps.resid_level(video.read_video(_abs(rc.path))[2:CAL_FRAMES])
+                    gain, got = calibrate_noise_gain(
+                        lambda g: attacks.sensor_noise(frames[:CAL_FRAMES], gain=g, prnu_std=0.01, seed=seed), target)
+                    frames = attacks.sensor_noise(frames, gain=gain, prnu_std=0.01, seed=seed)
+                    extra = {"noise_gain": gain, "resid_target": target, "resid_got": got}
                 video.write_mp4(frames, out, SPEC.fps, SPEC.crf, SPEC.preset)
             shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, cid))
             manifest().add(Clip(cid, vcell, c.scene, _rel(out), c.n_frames, c.fps, c.width, c.height,
-                                generator=c.generator, parent=c.clip_id, meta={"variant": kind}))
+                                generator=c.generator, parent=c.clip_id, meta={"variant": kind, **extra}))
             if store is not None:
                 store.stage(out)
             made.append(cid)
@@ -493,7 +600,8 @@ def report(pairs=None, n_boot: int = 1000) -> "object":
     sc = pd.read_csv(results_dir() / "scores.csv")
     man = manifest().to_frame()
     df = sc.merge(man[man.status == "ok"][["clip_id", "cell", "scene"]], on="clip_id")
-    present = set(df.cell)
+    present = {c for c in set(df.cell) if "@" not in c or c.split("@")[1] in VARIANTS}
+    df = df[df.cell.isin(present)]
     if pairs is None:
         pairs = [("RC", c) for c in CELLS if c != "RC" and c in present]
         for c in sorted(present):

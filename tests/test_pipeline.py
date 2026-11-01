@@ -112,13 +112,28 @@ def test_full_pipeline_with_fakes(work):
 
     # robustness variants and camera-simulating attacks become derived cells, paired like-for-like
     assert len(pipeline.build_variants("crf28", cells=("RC", "GR"))) == 2 * N_SCENES
-    assert len(pipeline.build_variants("blur", cells=("RC", "GR"))) == N_SCENES        # attacks skip real clips
-    assert pipeline.build_variants("blur", cells=("RC", "GR")) == []                    # resumable
+    assert len(pipeline.build_variants("blurcal", cells=("RC", "GR"))) == N_SCENES     # attacks skip real clips
+    assert pipeline.build_variants("blurcal", cells=("RC", "GR")) == []                 # resumable
+    assert 0 < pipeline.blur_exposure() <= 0.5
+    nc = pipeline.build_variants("noisecal", cells=("RC", "GR"), limit_scenes=3)        # attacks run on a subset
+    assert len(nc) == 3 and all("noise_gain" in pipeline.manifest().load()[i].meta for i in nc)
     pipeline.run_cps(n_folds=0, min_train=5, store=None)                                # leave-one-scene-out
     rep = pipeline.report(n_boot=50)
-    assert {"RC@crf28 vs GR@crf28", "RC vs GR@blur"} <= set(rep.pair)
+    assert {"RC@crf28 vs GR@crf28", "RC vs GR@blurcal"} <= set(rep.pair)
     fa = pipeline.feature_auc()
-    assert {"GR", "RR", "GR@blur"} <= set(fa.cell) and fa.drop(columns="cell").stack().between(0, 1).all()
+    assert {"GR", "RR", "GR@blurcal"} <= set(fa.cell) and fa.drop(columns="cell").stack().between(0, 1).all()
+
+    # resolution control: supersampled twins of GR/RR on a subset, same calibrated path as the originals
+    ctl = pipeline.subset_scenes(2, need=("RC", "GR", "RR"))
+    assert len(ctl) == 2
+    assert len(pipeline.build_gr(FakeFW(), store=None, geo=geo, cell="GRs", ss=2, scenes=ctl)) == 2
+    assert len(pipeline.build_rr(store=None, geo=geo, device="cpu", cell="RRs", ss=2, scenes=ctl)) == 2
+    man = pipeline.manifest().load()
+    for sc in ctl:
+        assert man[f"GRs_{sc[:16]}"].meta["path_speed"] == man[f"GR_{sc[:16]}"].meta["path_speed"]
+        assert man[f"RRs_{sc[:16]}"].meta["start_key"] == man[f"RR_{sc[:16]}"].meta["start_key"]
+        assert man[f"GRs_{sc[:16]}"].meta["ss"] == 2
+    assert pipeline.build_gr(FakeFW(), store=None, geo=geo, cell="GRs", ss=2, scenes=ctl) == []   # resumable
 
 
 def test_calibrate_matches_target_and_ends_at_returned_value():
@@ -149,3 +164,18 @@ def test_slow_path_stays_on_the_path():
     assert np.allclose(half[:, :3, :3] @ np.swapaxes(half[:, :3, :3], 1, 2), np.eye(3), atol=1e-9)
     step = np.linalg.norm(np.diff(half[:, :3, 3], axis=0), axis=1)
     assert np.allclose(step, step[0]) and step[0] < np.linalg.norm(c2w[1, :3, 3] - c2w[0, :3, 3])
+
+
+def test_noise_calibration_hits_target_after_encoding():
+    from c44 import attacks, cps
+    from tests.synthetic import clip
+    base = clip("render", 1, T=12, h=192, w=256)
+    frames = base[0] if isinstance(base, tuple) else base
+    frames = np.asarray(frames)
+    seed = 5
+    ref = pipeline._rt_resid(attacks.sensor_noise(frames, gain=0.003, prnu_std=0.01, seed=1))      # a "real" level
+    gain, got = pipeline.calibrate_noise_gain(lambda g: attacks.sensor_noise(frames, gain=g, prnu_std=0.01, seed=seed), ref)
+    assert abs(got / ref - 1) < 0.1 and 1e-5 < gain < 0.05
+    # a clip already noisier than the target gets (almost) no extra noise
+    g2, _ = pipeline.calibrate_noise_gain(lambda g: attacks.sensor_noise(frames, gain=g, prnu_std=0.01, seed=seed), ref * 0.2)
+    assert g2 <= 1e-4

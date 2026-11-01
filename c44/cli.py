@@ -28,7 +28,12 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("cps", help="capture-physics score (out-of-fold)")
     sub.add_parser("features", help="CPS per-clip features only (CPU)")
     sub.add_parser("evaluate", help="detectors + CPS + report tables (what the molab notebook runs)")
-    sub.add_parser("robust", help="recompression + camera-simulating attack variants, rescored")
+    s = sub.add_parser("robust", help="recompression + camera-simulating attack variants, rescored")
+    s.add_argument("--n", type=int, default=75, help="scenes for the (expensive) calibrated attacks")
+    s = sub.add_parser("control", help="supersampled GR/RR renders (resolution control), rescored")
+    s.add_argument("--n", type=int, default=40)
+    s.add_argument("--ss", type=int, default=3)
+    sub.add_parser("analyse", help="final tables: detectors, supervised physics score, attacks, control")
     sub.add_parser("report", help="metrics table")
     a = p.parse_args(argv)
 
@@ -45,7 +50,9 @@ def main(argv: list[str] | None = None) -> None:
         setup_env.install_flashworld()
         print(json.dumps(setup_env.report(), indent=1))
     elif a.cmd == "pull":
-        print(store.pull())
+        # the manifest, tables, base clips and geometry; not the thousands of recompression/attack variant clips
+        print(store.pull(["manifest.jsonl", "captions.json", "results/*", "meta/RC/*", "meta/GR/*", "meta/RR/*",
+                          "clips/RC/*", "clips/GR/*", "clips/RR/*"]))
     elif a.cmd == "rc":
         store.ensure_repo()
         pipeline.build_rc(a.n, a.seed, store)
@@ -69,16 +76,28 @@ def main(argv: list[str] | None = None) -> None:
         print(df.describe().T.round(3).to_string() if len(df) else "no clips")
         if not len(df) or not df.drop(columns=["clip_id"]).notna().any().any():
             raise SystemExit("CPS features are empty/NaN")
-    elif a.cmd in ("evaluate", "robust"):
+    elif a.cmd in ("evaluate", "robust", "control"):
         if a.cmd == "robust":
             for kind in pipeline.VARIANTS:
-                pipeline.build_variants(kind, store=store)
-        cells = sorted(pipeline.manifest().to_frame().cell.unique())
+                pipeline.build_variants(kind, store=store, limit_scenes=a.n)
+        if a.cmd == "control":
+            from .flashworld_gen import FlashWorld
+            ctl = pipeline.subset_scenes(a.n, need=("RC", "GR", "RR"))
+            fw = FlashWorld(setup_env.code_dir() / "FlashWorld")
+            pipeline.build_gr(fw, store=store, cell="GRs", ss=a.ss, scenes=ctl)
+            del fw
+            pipeline._release_gpu()
+            pipeline.build_rr(store=store, cell="RRs", ss=a.ss, scenes=ctl)
+        cells = sorted(c for c in pipeline.manifest().to_frame().cell.unique()
+                       if "@" not in c or c.split("@")[1] in pipeline.VARIANTS)   # skip retired attack variants
         pipeline.run_detectors(("univfd", "npr", "consistency"), cells=cells, store=store)
         n_rc = len(pipeline.manifest().by_cell("RC"))
         pipeline.run_cps(n_folds=0 if n_rc < 30 else 5, min_train=4 if n_rc < 30 else 10, store=store)
         pipeline.report(n_boot=500)
         pipeline.feature_auc().to_csv(pipeline.results_dir() / "feature_auc.csv", index=False)
+    elif a.cmd == "analyse":
+        from . import analysis
+        print(analysis.run(store=store))
     elif a.cmd == "report":
         print(pipeline.report().to_string(index=False))
 
