@@ -20,7 +20,7 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v16-final"
+VERSION = "v17-fusion"
 ATTACK_N = 150     # scenes for the camera-aware attacks (all scenes of the full run)
 CONTROL_N = 100    # scenes for the supersampled-render resolution control
 
@@ -185,8 +185,9 @@ def run(stage: str, n_scenes: int | None = None):
     if stage == "control":
         _need(["control", "--n", str(min(n_scenes or CONTROL_N, CONTROL_N))])
         return None
-    if stage == "physics":
+    if stage == "physics":                          # CPU physics cues, then the CLIP / NPR backbone embeddings (GPU)
         _need(["physics"])
+        _need(["embed"])
         return None
     if stage == "analyse":
         _need(["analyse"])

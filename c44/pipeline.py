@@ -476,9 +476,23 @@ VARIANTS = {
     # Retired: fixed-parameter "blur"/"noise"/"blur+noise" (overshot) and "noisecal"/"blurcal+noisecal" (calibrated only
     # the shot-noise gain, so a read-noise floor kept 117/288 clips at 1.3-1.7x the real noise level).
     "blurcal": ("blurcal", None), "noiseadapt": ("noiseadapt", None), "blurcal+noiseadapt": ("blurcal+noiseadapt", None),
-    # attacker who also knows the auto-exposure cue: fakes exposure / white-balance jitter at the paired real clip's level
-    "aeadapt": ("aeadapt", None), "blurcal+noiseadapt+aeadapt": ("blurcal+noiseadapt+aeadapt", None),
+    # attacker who also knows the auto-exposure cue: fakes exposure / white-balance jitter at the paired real clip's MEASURED level
+    # ("aeadapt" and its composite, built with the uncalibrated sigma in v15, are retired: those clips are ignored and rebuilt as "aecal")
+    "aecal": ("aecal", None), "blurcal+noiseadapt+aecal": ("blurcal+noiseadapt+aecal", None),
+    # Randomised-operator clips: the same operators at random strengths (attacks.nuisance), not calibrated to any real clip. On fakes
+    # they are the training set of randomised-attacker training (RAT); on real clips they are the false-alarm test and, labelled real,
+    # the symmetric variant (SYM). Never scored by the generic detectors.
+    "nz-blur": ("nuisance", ["blur"]), "nz-noise": ("nuisance", ["noise"]), "nz-ae": ("nuisance", ["ae"]),
+    "nz-blur+noise": ("nuisance", ["blur", "noise"]), "nz-all": ("nuisance", ["blur", "noise", "ae"]),
 }
+AUG_ONLY = {k for k in VARIANTS if k.startswith("nz-")}
+
+
+def scored_variant(cell: str) -> bool:
+    """Cells that are evaluated (clean, recompression, calibrated attacks); not retired variants, not training-only clips."""
+    return "@" not in cell or (cell.split("@")[1] in VARIANTS and cell.split("@")[1] not in AUG_ONLY)
+
+
 CAL_FRAMES = 12
 
 
@@ -573,6 +587,10 @@ def _variant_worker(job: dict) -> dict:
             video.write_mp4(frames, job["out"], SPEC.fps, crf=int(job["param"]), preset=SPEC.preset)
             return {"cid": cid, "extra": extra}
         seed = zlib.crc32(cid.encode())
+        if op == "nuisance":
+            frames, extra = attacks.nuisance(frames, job["param"], seed=seed)
+            video.write_mp4(frames, job["out"], SPEC.fps, SPEC.crf, SPEC.preset)
+            return {"cid": cid, "extra": extra}
         if "blurcal" in op:
             mo = geometry.motion(geometry.Geometry.load(job["meta"]))
             d = np.where(np.isfinite(mo["direction"]), mo["direction"], [1.0, 0.0])
@@ -583,7 +601,7 @@ def _variant_worker(job: dict) -> dict:
             strength, got = calibrate_noise_strength(lambda s: attacks.scaled_noise(frames[:CAL_FRAMES], s, seed), target)
             frames = attacks.scaled_noise(frames, strength, seed)
             extra = {"noise_strength": strength, "resid_target": target, "resid_got": got}
-        if "aeadapt" in op:
+        if "aecal" in op:
             gm, wm = physics.gain_targets(video.read_video(job["parent_src"]))
             sg, sw = calibrate_exposure_jitter(frames, gm, wm, seed + 1)
             frames = attacks.exposure_jitter(frames, sg, sw, seed + 1)
@@ -609,7 +627,7 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
     exposure = blur_exposure(log=log) if "blurcal" in op else None          # calibrated once, before the workers start
     jobs, clips = [], {}
     for cell in cells:
-        if op != "compress" and cell == "RC":
+        if op not in ("compress", "nuisance") and cell == "RC":          # calibrated attacks exist for fakes; 'nz-*' also run on real
             continue
         vcell = f"{cell}@{kind}"
         for c in manifest().by_cell(cell):
@@ -700,7 +718,7 @@ def report(pairs=None, n_boot: int = 1000) -> "object":
     sc = pd.read_csv(results_dir() / "scores.csv")
     man = manifest().to_frame()
     df = sc.merge(man[man.status == "ok"][["clip_id", "cell", "scene"]], on="clip_id")
-    present = {c for c in set(df.cell) if "@" not in c or c.split("@")[1] in VARIANTS}
+    present = {c for c in set(df.cell) if scored_variant(c)}
     df = df[df.cell.isin(present)]
     if pairs is None:
         pairs = [("RC", c) for c in CELLS if c != "RC" and c in present]

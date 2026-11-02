@@ -117,8 +117,12 @@ def test_full_pipeline_with_fakes(work):
     assert 0 < pipeline.blur_exposure() <= 0.5
     nc = pipeline.build_variants("noiseadapt", cells=("RC", "GR"), limit_scenes=3, n_jobs=1)     # attacks run on a subset
     assert len(nc) == 3 and all("noise_strength" in pipeline.manifest().load()[i].meta for i in nc)
-    ae = pipeline.build_variants("aeadapt", cells=("RC", "GR"), limit_scenes=3, n_jobs=2)             # parallel worker pool
+    ae = pipeline.build_variants("aecal", cells=("RC", "GR"), limit_scenes=3, n_jobs=2)             # parallel worker pool
     assert len(ae) == 3 and all("gain_sigma" in pipeline.manifest().load()[i].meta for i in ae)
+    nz = pipeline.build_variants("nz-all", cells=("RC", "GR"), limit_scenes=3, n_jobs=1)           # randomised training clips: fakes only
+    assert len(nz) == 6 and all({"blur_exposure", "noise_strength", "gain_sigma"} <= set(pipeline.manifest().load()[i].meta) for i in nz)
+    assert {c.cell for c in pipeline.manifest().load().values() if "@nz-all" in c.cell} == {"RC@nz-all", "GR@nz-all"}     # real too
+    assert pipeline.scored_variant("GR@blurcal") and not pipeline.scored_variant("GR@nz-all") and not pipeline.scored_variant("GR@aeadapt")
     pipeline.run_cps(n_folds=0, min_train=5, store=None)                                # leave-one-scene-out
     rep = pipeline.report(n_boot=50)
     assert {"RC@crf28 vs GR@crf28", "RC vs GR@blurcal"} <= set(rep.pair)

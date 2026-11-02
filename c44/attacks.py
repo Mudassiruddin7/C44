@@ -67,3 +67,38 @@ def sensor_noise(frames: np.ndarray, gain: float = 0.004, read_std: float = 0.00
         x = rng.poisson(np.clip(x, 0, None) / gain) * gain + read_std * rng.standard_normal(x.shape)
         out[t] = np.clip(np.clip(x, 0, 1) ** (1 / 2.2) * 255.0 + 0.5, 0, 255).astype(np.uint8)
     return out
+
+
+# ----------------------------------------------------------------------------- nuisance operators (training-time, any cell)
+NUISANCE_OPS = ("blur", "noise", "ae")
+
+
+def nuisance(frames: np.ndarray, ops, seed: int = 0, motion: dict | None = None) -> tuple[np.ndarray, dict]:
+    """Randomised capture operators applied to ANY clip, real or fake (symmetric augmentation).
+
+    The camera-aware attacks above are calibrated to a paired real clip and only exist for fakes, so a detector trained on
+    them can learn the attack's footprint ("added noise = fake") instead of a real difference. Applying the same operators,
+    with strengths drawn from the attacker's range, to real clips too makes the operator uninformative about the label:
+    blur length 0.15-0.6x the image motion, noise strength 0.02-0.6 (log-uniform; the matched attacker needed 0.001-0.33),
+    exposure walk 2e-4 to 8e-3 per frame (the range of real clips) with a white-balance walk of similar size. Motion comes from optical flow, so no
+    geometry is needed. Returns (frames, drawn parameters)."""
+    rng = np.random.default_rng(seed)
+    ops, params = set(ops), {}
+    out = frames
+    if "blur" in ops:
+        if motion is None:
+            from . import physics
+            motion = physics.flow_motion(frames)
+        m = np.where(np.isfinite(motion["m"]), motion["m"], 0.0)
+        d = np.where(np.isfinite(motion["direction"]), motion["direction"], [1.0, 0.0])
+        params["blur_exposure"] = float(rng.uniform(0.15, 0.6))
+        out = motion_blur(out, m, d, exposure=params["blur_exposure"])
+    if "noise" in ops:
+        params["noise_strength"] = float(np.exp(rng.uniform(np.log(0.02), np.log(0.6))))
+        out = scaled_noise(out, params["noise_strength"], seed)
+    if "ae" in ops:
+        sg = float(np.exp(rng.uniform(np.log(2e-4), np.log(8e-3))))
+        sw = float(sg * np.exp(rng.normal(0.0, 0.5)))
+        params.update(gain_sigma=sg, wb_sigma=sw)
+        out = exposure_jitter(out, sg, sw, seed + 1)
+    return out, params

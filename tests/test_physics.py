@@ -33,14 +33,14 @@ def test_exposure_jitter_attack_hits_its_target_and_is_measured():
     assert 0.4 * sigma < gm < 2.5 * sigma and wm > 5e-4              # measured jitter is the injected one (within estimator slack)
 
 
-def _toy_features(rng, n_scenes=50):
+def _toy_features(rng, n_scenes=50, nz=False):
     """Fabricated feature table: fakes shifted in a few features, recompression and attacks as extra cells."""
     rows = []
     for s in range(n_scenes):
         scene = f"{s:02x}" + "ab" * 6
         for cell, shift in (("RC", 0.0), ("GR", 1.2), ("RR", 0.9)):
-            for var in ("", "crf28", "blurcal"):
-                if var == "blurcal" and (cell == "RC" or s >= 40):
+            for var in ("", "crf28", "blurcal") + (("nz-noise", "nz-all") if nz else ()):
+                if var in ("blurcal", "nz-noise", "nz-all") and ((cell == "RC" and var == "blurcal") or s >= 40):
                     continue
                 if var == "crf28" and s >= 45:
                     continue

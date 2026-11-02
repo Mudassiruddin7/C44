@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 
 _AUC = re.compile(r"([0-9.]+) \[([0-9.]+),([0-9.]+)\]")
-ATTACK_NAMES = {"aeadapt": "exposure\njitter", "blurcal": "blur", "noiseadapt": "noise", "blurcal+noiseadapt": "blur\n+ noise",
-                "blurcal+noiseadapt+aeadapt": "blur + noise\n+ exposure"}
+ATTACK_NAMES = {"aecal": "exposure\njitter", "blurcal": "blur", "noiseadapt": "noise", "blurcal+noiseadapt": "blur\n+ noise",
+                "blurcal+noiseadapt+aecal": "blur + noise\n+ exposure"}
 
 
 def parse_auc(s) -> tuple[float, float, float]:
@@ -40,8 +40,9 @@ def _style():
 
 def fig_main(main: pd.DataFrame, path: Path) -> None:
     plt = _style()
-    dets = [("univfd", "UnivFD"), ("npr", "NPR"), ("consistency", "Consistency"), ("CPS-1 (one-class)", "CPS-1"),
-            ("CPS-2 one-class", "CPS-2 one-class"), ("CPS-2 supervised", "CPS-2")]
+    dets = [("univfd", "UnivFD"), ("npr", "NPR"), ("consistency", "Consistency"), ("CLIP probe", "UnivFD retrained"),
+            ("CPS-2 supervised", "CPS-2"), ("CPS-2 + CLIP", "CPS-2 + CLIP")]
+    dets = [(c, n) for c, n in dets if c in main.columns]
     rows = [(f, s) for f in ("GR", "RR") for s in ("clean", "crf28", "crf35")]
     sel = []
     for f, s in rows:
@@ -50,7 +51,7 @@ def fig_main(main: pd.DataFrame, path: Path) -> None:
             sel.append((f, s, r.iloc[0]))
     fig, ax = plt.subplots(figsize=(7.0, 2.6))
     w = 0.8 / len(dets)
-    colors = ["#9aa0a6", "#b7bcc2", "#cfd3d7", "#d9a441", "#7aa6c2", "#1f5f8b"]
+    colors = ["#9aa0a6", "#b7bcc2", "#cfd3d7", "#d9a441", "#7aa6c2", "#1f5f8b"][:len(dets)-1] + ["#0b2f4a"]
     x = np.arange(len(sel))
     for k, (col, name) in enumerate(dets):
         _bars(ax, x + (k - (len(dets) - 1) / 2) * w, [r.get(col) for _, _, r in sel], w, name, colors[k])
@@ -58,7 +59,7 @@ def fig_main(main: pd.DataFrame, path: Path) -> None:
     ax.set_xticks(x, [f"{'Generated' if f == 'GR' else 'Real-scene'}\n{'clean' if s == 'clean' else s.upper().replace('CRF', 'CRF ')}" for f, s, _ in sel])
     ax.set_ylabel("AUC (real vs fake)")
     ax.set_ylim(0, 1.02)
-    ax.legend(ncol=6, loc="upper center", bbox_to_anchor=(0.5, 1.22), frameon=False, fontsize=7)
+    ax.legend(ncol=len(dets), loc="upper center", bbox_to_anchor=(0.5, 1.22), frameon=False, fontsize=7)
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     fig.savefig(path.with_suffix(".png"), bbox_inches="tight", dpi=200)
@@ -67,8 +68,20 @@ def fig_main(main: pd.DataFrame, path: Path) -> None:
 
 def fig_attacks(table: pd.DataFrame, path: Path) -> None:
     plt = _style()
-    cols = [("CPS-2 supervised", "no attack training", "#1f5f8b"), ("CPS-2 + aug (unseen components)", "aug: components unseen", "#c0504d"),
-            ("CPS-2 + aug (unseen combination)", "aug: new combination", "#d9a441"), ("CPS-2 + aug (attack seen)", "aug: attack seen", "#5b9a68")]
+    fused = "CPS-2 + CLIP" in table.columns
+    head = "CPS-2 + CLIP" if fused else "CPS-2"
+    cols = [("CPS-2 supervised", "CPS-2", "#8a8f94"),
+            ("CPS-2 + CLIP", "CPS-2 + CLIP", "#1f5f8b"),
+            ("CPS-2 + CLIP + RAT (components unseen)", "+ RAT, components unseen", "#c0504d"),
+            ("CPS-2 + CLIP + RAT", "+ RAT (randomised-attacker training)", "#d9a441"),
+            ("CPS-2 + CLIP + aug (attack seen)", "+ trained on this attack", "#5b9a68")]
+    cols = [c for c in cols if c[0] in table.columns]
+    if len(cols) < 3:                                           # no fusion / RAT in this table: fall back to CPS-2 variants
+        cols = [("CPS-2 supervised", "no attack training", "#1f5f8b"),
+                ("CPS-2 + aug (unseen components)", "aug: components unseen", "#c0504d"),
+                ("CPS-2 + aug (unseen combination)", "aug: new combination", "#d9a441"),
+                ("CPS-2 + aug (attack seen)", "aug: attack seen", "#5b9a68")]
+        cols = [c for c in cols if c[0] in table.columns]
     kinds = [k for k in ATTACK_NAMES if (table.setting == k).any()]
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.7), sharey=True, constrained_layout=True)
     for ax, f, title in zip(axes, ("GR", "RR"), ("Generated worlds", "Real-scene renders")):
@@ -83,7 +96,7 @@ def fig_attacks(table: pd.DataFrame, path: Path) -> None:
     axes[0].set_ylabel("AUC (real vs attacked fake)")
     axes[0].set_ylim(0, 1.02)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, ncol=4, loc="outside upper center", frameon=False, fontsize=7)
+    fig.legend(handles, labels, ncol=3, loc="outside upper center", frameon=False, fontsize=7)
     fig.savefig(path, bbox_inches="tight")
     fig.savefig(path.with_suffix(".png"), bbox_inches="tight", dpi=200)
     plt.close(fig)

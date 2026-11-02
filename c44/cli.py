@@ -29,11 +29,12 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("features", help="CPS per-clip features only (CPU)")
     sub.add_parser("evaluate", help="detectors + CPS + report tables (what the molab notebook runs)")
     s = sub.add_parser("robust", help="recompression + camera-simulating attack variants, rescored")
-    s.add_argument("--n", type=int, default=75, help="scenes for the (expensive) calibrated attacks")
+    s.add_argument("--n", type=int, default=150, help="scenes for the camera-aware attacks")
     s = sub.add_parser("control", help="supersampled GR/RR renders (resolution control), rescored")
-    s.add_argument("--n", type=int, default=40)
+    s.add_argument("--n", type=int, default=100)
     s.add_argument("--ss", type=int, default=3)
     sub.add_parser("physics", help="CPS-2 physics features of every clip (CPU, parallel)")
+    sub.add_parser("embed", help="CLIP and NPR backbone embeddings of every clip (for the retrained probes and the fusion)")
     s = sub.add_parser("figures", help="paper figures from the analysis CSVs (needs matplotlib)")
     s.add_argument("--dir", required=True, help="folder with cps2_main.csv etc. (results/analysis)")
     s.add_argument("--out", default="figures")
@@ -61,7 +62,7 @@ def main(argv: list[str] | None = None) -> None:
         # the manifest, tables, base clips and geometry; not the thousands of recompression/attack variant clips
         print(store.pull(["manifest.jsonl", "captions.json", "results/*", "meta/RC/*", "meta/GR/*", "meta/RR/*",
                           "clips/RC/*", "clips/GR/*", "clips/RR/*", "clips/GRs/*", "clips/RRs/*",
-                          "clips/*@crf*/*", "clips/*@blurcal*/*", "clips/*@noiseadapt*/*", "clips/*@aeadapt*/*"]))
+                          "clips/*@crf*/*", "clips/*@blurcal*/*", "clips/*@noiseadapt*/*", "clips/*@aecal*/*", "clips/*@nz-*/*"]))
     elif a.cmd == "rc":
         store.ensure_repo()
         pipeline.build_rc(a.n, a.seed, store)
@@ -98,7 +99,7 @@ def main(argv: list[str] | None = None) -> None:
             pipeline._release_gpu()
             pipeline.build_rr(store=store, cell="RRs", ss=a.ss, scenes=ctl)
         cells = sorted(c for c in pipeline.manifest().to_frame().cell.unique()
-                       if "@" not in c or c.split("@")[1] in pipeline.VARIANTS)   # skip retired attack variants
+                       if pipeline.scored_variant(c))            # skip retired attack variants and training-only clips
         pipeline.run_detectors(("univfd", "npr", "consistency"), cells=cells, store=store)
         n_rc = len(pipeline.manifest().by_cell("RC"))
         pipeline.run_cps(n_folds=0 if n_rc < 30 else 5, min_train=4 if n_rc < 30 else 10, store=store)
@@ -108,6 +109,9 @@ def main(argv: list[str] | None = None) -> None:
         from . import figures
         for p in figures.make_figures(a.dir, a.out):
             print(p)
+    elif a.cmd == "embed":
+        from . import embed
+        print(embed.run(store=store))
     elif a.cmd == "physics":
         df = pipeline.physics_features(store=store)
         print(f"{len(df)} clips with physics features")
