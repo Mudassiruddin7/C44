@@ -619,7 +619,6 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
     exposure / white-balance jitter matched to it) for render cells. Geometry is reused from the parent clip, since camera
     motion is unchanged. Attacks run on the first `limit_scenes` scenes. Clips are made in parallel (CPU only)."""
     import os
-    from multiprocessing import Pool
     op, param = VARIANTS[kind]
     done = _finished_parents()
     keep = subset_scenes(limit_scenes) if (limit_scenes and op != "compress") else None
@@ -644,15 +643,8 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
         if n <= 1 or len(jobs) <= 1:
             results = [_variant_worker(j) for j in jobs]
         else:
-            import time
-            t0 = time.time()
             log(f"[variants] {kind}: building {len(jobs)} clips on {min(n, len(jobs))} processes")
-            with Pool(min(n, len(jobs)), initializer=_phys_init) as pool:
-                for k, r in enumerate(pool.imap_unordered(_variant_worker, jobs, chunksize=1), 1):
-                    results.append(r)
-                    if k % 20 == 0 or k == len(jobs):
-                        el = (time.time() - t0) / 60
-                        log(f"[variants] {kind}: {k}/{len(jobs)}  {el:.1f} min  (about {el / k * (len(jobs) - k):.0f} min left)")
+            results = run_pool(_variant_worker, jobs, n, log=log, label=f"variants {kind}")
     made = []
     for r in results:
         if "error" in r:
@@ -668,6 +660,66 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
     log(f"[variants] {kind}: {len(made)} clips")
     _flush(store, msg=f"c44: variants {kind}")
     return made
+
+
+def _call_indexed(args):
+    fn, i, job = args
+    return i, fn(job)
+
+
+def run_pool(fn, jobs, n: int, log: Log = print, label: str = "pool", every: int = 20, timeout: float = 300.0, on_result=None) -> list:
+    """Map `fn` over `jobs` (CPU work) in a SPAWN-based process pool and return the results in job order.
+
+    Spawn, not fork: a forked worker inherits the parent's threads and locks (HF upload client, BLAS, ffmpeg), which can leave it
+    hung forever. Progress is logged every `every` results with an estimate. Watchdog: if no result arrives for `timeout` seconds
+    the pool is terminated, and the jobs that are still open are finished in threads (stack traces are dumped and an error raised
+    if even that makes no progress), so a stage can slow down but never sit silent forever."""
+    import multiprocessing as mp
+    import time
+    jobs = list(jobs)
+    done: dict[int, object] = {}
+    t0 = time.time()
+
+    def note():
+        k = len(done)
+        if k % every == 0 or k == len(jobs):
+            el = (time.time() - t0) / 60
+            log(f"[{label}] {k}/{len(jobs)}  {el:.1f} min  (about {el / k * (len(jobs) - k):.0f} min left)")
+
+    pool = mp.get_context("spawn").Pool(min(n, len(jobs)), initializer=_phys_init)
+    try:
+        it = pool.imap_unordered(_call_indexed, [(fn, i, j) for i, j in enumerate(jobs)], chunksize=1)
+        for _ in jobs:
+            i, r = it.next(timeout=timeout)
+            done[i] = r
+            if on_result:
+                on_result(r)
+            note()
+    except mp.TimeoutError:
+        rest = [i for i in range(len(jobs)) if i not in done]
+        log(f"[{label}] no result for {timeout:.0f} s: the process pool looks hung; finishing {len(rest)} jobs in threads")
+        pool.terminate()
+        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+        ex = ThreadPoolExecutor(min(n, 12))
+        pend = {ex.submit(fn, jobs[i]): i for i in rest}
+        while pend:
+            fin, _ = wait(list(pend), timeout=timeout, return_when=FIRST_COMPLETED)
+            if not fin:
+                import faulthandler
+                import sys
+                faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise RuntimeError(f"[{label}] hung: no job finished for {timeout:.0f} s even in threads (stack traces above)")
+            for f in fin:
+                i = pend.pop(f)
+                done[i] = f.result()
+                if on_result:
+                    on_result(done[i])
+                note()
+        ex.shutdown()
+    finally:
+        pool.terminate()
+    return [done[i] for i in range(len(jobs))]
 
 
 def _phys_init() -> None:
@@ -688,7 +740,6 @@ def physics_features(store: Store | None = None, log: Log = print, n_jobs: int |
     """CPS-2 features of every ok clip (parallel over clips, resumable, cached in results/physics_features.csv)."""
     import os
     import pandas as pd
-    from multiprocessing import Pool
     out = results_dir() / "physics_features.csv"
     df = pd.read_csv(out) if out.exists() else pd.DataFrame()
     have = set(df.clip_id) if len(df) else set()
@@ -698,11 +749,13 @@ def physics_features(store: Store | None = None, log: Log = print, n_jobs: int |
     log(f"[physics] {len(jobs)} clips to measure ({len(have)} cached)")
     if jobs:
         rows = []
-        with Pool(n_jobs or max(1, (os.cpu_count() or 2) - 1), initializer=_phys_init) as pool:
-            for k, row in enumerate(pool.imap_unordered(_phys_worker, jobs, chunksize=2), 1):
-                rows.append(row)
-                if k % 200 == 0 or k == len(jobs):
-                    log(f"[physics] {k}/{len(jobs)}")
+
+        def keep(row):                                             # partial results survive a crash or a session restart
+            rows.append(row)
+            if len(rows) % 500 == 0:
+                pd.concat([df, pd.DataFrame(rows)], ignore_index=True).to_csv(out, index=False)
+
+        run_pool(_phys_worker, jobs, n_jobs or max(1, (os.cpu_count() or 2) - 1), log=log, label="physics", every=200, on_result=keep)
         df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
         df.to_csv(out, index=False)
     _flush(store, [out], "c44: physics features")
