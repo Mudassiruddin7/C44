@@ -644,11 +644,15 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
         if n <= 1 or len(jobs) <= 1:
             results = [_variant_worker(j) for j in jobs]
         else:
+            import time
+            t0 = time.time()
+            log(f"[variants] {kind}: building {len(jobs)} clips on {min(n, len(jobs))} processes")
             with Pool(min(n, len(jobs)), initializer=_phys_init) as pool:
-                for k, r in enumerate(pool.imap_unordered(_variant_worker, jobs, chunksize=2), 1):
+                for k, r in enumerate(pool.imap_unordered(_variant_worker, jobs, chunksize=1), 1):
                     results.append(r)
-                    if k % 100 == 0:
-                        log(f"[variants] {kind}: {k}/{len(jobs)}")
+                    if k % 20 == 0 or k == len(jobs):
+                        el = (time.time() - t0) / 60
+                        log(f"[variants] {kind}: {k}/{len(jobs)}  {el:.1f} min  (about {el / k * (len(jobs) - k):.0f} min left)")
     made = []
     for r in results:
         if "error" in r:
