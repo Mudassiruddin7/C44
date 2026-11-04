@@ -43,6 +43,15 @@ def _abs(rel: str) -> Path:
     return config.work_dir() / rel
 
 
+def _meta_of(c: Clip) -> Path:
+    """Geometry file of a clip. A recompressed / attacked variant has the camera of the clip it derives from; its own copy is made when
+    it is built but is not kept on the HF repo, so after a resume fall back to the parent's file."""
+    p = config.meta_path(c.cell, c.clip_id)
+    if not p.exists() and c.parent:
+        p = config.meta_path(c.cell.split("@")[0], c.parent)
+    return p
+
+
 def _flush(store: Store | None, extra: list[Path] = (), msg: str = "c44") -> None:
     if store is None:
         return
@@ -390,7 +399,7 @@ def run_detectors(names=("univfd", "npr", "consistency"), cells=CELLS, store: St
         for j, c in enumerate(clips):
             if (c.clip_id, name) in have:
                 continue
-            geom = geometry.Geometry.load(config.meta_path(c.cell, c.clip_id)) if det.needs_geometry else None
+            geom = geometry.Geometry.load(_meta_of(c)) if det.needs_geometry else None
             rows.append({"clip_id": c.clip_id, "detector": name, "score": det.score(video.read_video(_abs(c.path)), geom)})
             if len(rows) % 50 == 0:
                 log(f"[{name}] {j + 1}/{len(clips)}")
@@ -425,7 +434,7 @@ def cps_features(cells=CELLS, log: Log = print) -> "object":
         for c in manifest().by_cell(cell):
             if c.clip_id in have:
                 continue
-            mo = geometry.motion(geometry.Geometry.load(config.meta_path(cell, c.clip_id)))
+            mo = geometry.motion(geometry.Geometry.load(_meta_of(c)))
             f = cps.clip_features(video.read_video(_abs(c.path)), mo["m"], mo["direction"], mo["flow_grid"])
             rows.append({"clip_id": c.clip_id, **f})
     if rows:
@@ -442,7 +451,7 @@ def run_cps(n_folds: int = 5, seed: int = 0, store: Store | None = None, log: Lo
     import pandas as pd
     from . import cps
     man = manifest().to_frame()[["clip_id", "cell", "scene", "status"]]
-    cells = cells or sorted(man.cell.unique())
+    cells = cells or sorted(c for c in man.cell.unique() if scored_variant(c))          # not retired variants / training-only clips
     feats = cps_features(cells=cells, log=log)
     df = feats.merge(man[man.status == "ok"], on="clip_id")
     scenes = np.array(sorted(df.scene.unique()))

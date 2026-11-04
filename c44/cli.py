@@ -62,7 +62,8 @@ def main(argv: list[str] | None = None) -> None:
         # the manifest, tables, base clips and geometry; not the thousands of recompression/attack variant clips
         print(store.pull(["manifest.jsonl", "captions.json", "results/*", "meta/RC/*", "meta/GR/*", "meta/RR/*",
                           "clips/RC/*", "clips/GR/*", "clips/RR/*", "clips/GRs/*", "clips/RRs/*",
-                          "clips/*@crf*/*", "clips/*@blurcal*/*", "clips/*@noiseadapt*/*", "clips/*@aecal*/*", "clips/*@nz-*/*"]))
+                          "clips/*@crf*/*", "clips/*@blurcal/*", "clips/*@noiseadapt/*", "clips/*@blurcal+noiseadapt/*", "clips/*@aecal/*",
+                          "clips/*@blurcal+noiseadapt+aecal/*", "clips/*@nz-*/*"]))       # current variants only, not the retired ones
     elif a.cmd == "rc":
         store.ensure_repo()
         pipeline.build_rc(a.n, a.seed, store)

@@ -175,9 +175,11 @@ def attach_embeddings(pf: pd.DataFrame, log=print) -> tuple[pd.DataFrame, dict]:
         e = e / np.linalg.norm(e, axis=1, keepdims=True) if norm else e
         cols = [f"{key}{i}" for i in range(e.shape[1])]
         frame = pd.DataFrame(e, index=ids, columns=cols).reindex(pf.clip_id)
-        miss = int(frame.iloc[:, 0].isna().sum())
+        gone = frame.iloc[:, 0].isna().to_numpy()
+        miss = int(gone.sum())
         if miss:
-            log(f"[analysis] {miss}/{len(pf)} clips lack {key} embeddings: the {name} probe and fusion are skipped")
+            where = pf.cell[gone].value_counts().head(6).to_dict()
+            log(f"[analysis] {miss}/{len(pf)} clips lack {key} embeddings (cells: {where}): the {name} probe and fusion are skipped")
             continue
         parts.append(frame.reset_index(drop=True))
         emb_cols[name] = cols
