@@ -46,6 +46,10 @@ def main(argv: list[str] | None = None) -> None:
         import os
         for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             os.environ[v] = "1"
+    if a.cmd in ("robust", "physics", "embed", "analyse", "evaluate", "control"):
+        import faulthandler
+        import sys
+        faulthandler.dump_traceback_later(900, repeat=True, file=sys.stderr)        # a stalled stage shows WHERE every 15 min
     from . import pipeline, setup_env
     from .storage import Store
     store = Store()

@@ -88,7 +88,7 @@ def work(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_full_pipeline_with_fakes(work):
+def test_full_pipeline_with_fakes(work, monkeypatch):
     geo = FakeGeo()
     made = pipeline.build_rc(N_SCENES, store=None, geo=geo)
     assert len(made) == N_SCENES
@@ -114,6 +114,7 @@ def test_full_pipeline_with_fakes(work):
     assert len(pipeline.build_variants("crf28", cells=("RC", "GR"), n_jobs=1)) == 2 * N_SCENES
     assert len(pipeline.build_variants("blurcal", cells=("RC", "GR"), n_jobs=1)) == N_SCENES     # attacks skip real clips
     assert pipeline.build_variants("blurcal", cells=("RC", "GR"), n_jobs=1) == []                 # resumable
+    monkeypatch.setenv("C44_RECALIBRATE", "1")                                         # exercise the measurement itself
     assert 0 < pipeline.blur_exposure() <= 0.5
     nc = pipeline.build_variants("noiseadapt", cells=("RC", "GR"), limit_scenes=3, n_jobs=1)     # attacks run on a subset
     assert len(nc) == 3 and all("noise_strength" in pipeline.manifest().load()[i].meta for i in nc)

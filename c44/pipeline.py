@@ -549,9 +549,15 @@ def blur_exposure(n: int = 12, grid=(0.05, 0.1, 0.2, 0.3, 0.5), log: Log = print
     """Exposure (blur length / image motion) at which attacked renders reproduce the real clips' sharpness-vs-motion
     behaviour: the grid value whose median `sharp_ratio` on n GR clips is closest to the real (RC) median."""
     from . import attacks, cps
+    import os
     path = results_dir() / "blur_exposure.json"
     if path.exists():
         return float(json.loads(path.read_text())["exposure"])
+    shipped = Path(__file__).parent / "data" / "blur_exposure.json"          # measured once on the full v15 run; deterministic
+    if shipped.exists() and not os.environ.get("C44_RECALIBRATE"):
+        v = float(json.loads(shipped.read_text())["exposure"])
+        log(f"[blur] exposure {v} (calibrated on the v15 run; set C44_RECALIBRATE=1 to measure again)")
+        return v
     feats = cps_features(cells=("RC",), log=lambda *_: None)
     target = float(np.nanmedian(feats[feats.clip_id.str.match(r"^RC_[0-9a-f]+$")].sharp_ratio))
     clips = manifest().by_cell("GR")[:n]

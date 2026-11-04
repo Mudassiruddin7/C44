@@ -28,3 +28,6 @@ include = ["c44*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+c44 = ["data/*.json"]
