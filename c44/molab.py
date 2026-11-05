@@ -20,7 +20,7 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v17.4-trace"
+VERSION = "v17.5-chunks"
 ATTACK_N = 150     # scenes for the camera-aware attacks (all scenes of the full run)
 CONTROL_N = 100    # scenes for the supersampled-render resolution control
 

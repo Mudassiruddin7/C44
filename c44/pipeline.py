@@ -628,12 +628,13 @@ def _variant_worker(job: dict) -> dict:
 
 
 def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = None, log: Log = print,
-                   limit_scenes: int | None = None, n_jobs: int | None = None) -> list[str]:
+                   limit_scenes: int | None = None, n_jobs: int | None = None, chunk: int = 100) -> list[str]:
     """Derived cells '<cell>@<kind>' (e.g. RC@crf28, GR@blurcal): recompression for every cell, camera-simulating
     attacks (motion blur along the measured motion; sensor noise with PRNU, level matched to the paired real clip;
     exposure / white-balance jitter matched to it) for render cells. Geometry is reused from the parent clip, since camera
-    motion is unchanged. Attacks run on the first `limit_scenes` scenes. Clips are made in parallel (CPU only)."""
-    import os
+    motion is unchanged. Attacks run on the first `limit_scenes` scenes. Clips are made in parallel (CPU only), `chunk` at a
+    time, and every chunk is recorded and pushed to the HF repo: if the notebook session is reset mid-way (it has been), at most
+    one chunk of work is lost instead of the whole attack kind."""
     op, param = VARIANTS[kind]
     done = _finished_parents()
     keep = subset_scenes(limit_scenes) if (limit_scenes and op != "compress") else None
@@ -652,29 +653,70 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
             jobs.append({"cid": cid, "op": op, "param": param, "exposure": exposure, "src": str(_abs(c.path)),
                          "parent_src": str(_abs(allc[c.parent].path)) if c.parent in allc else "",
                          "meta": str(config.meta_path(cell, c.clip_id)), "out": str(config.clip_path(vcell, cid))})
-    results = []
-    if jobs:
-        n = n_jobs or max(1, (os.cpu_count() or 2) - 1)
-        if n <= 1 or len(jobs) <= 1:
-            results = [_variant_worker(j) for j in jobs]
-        else:
-            log(f"[variants] {kind}: building {len(jobs)} clips on {min(n, len(jobs))} processes")
-            results = run_pool(_variant_worker, jobs, n, log=log, label=f"variants {kind}")
     made = []
-    for r in results:
-        if "error" in r:
-            log(f"[variants] {r['cid']} failed: {r['error']}")
-            continue
-        cell, vcell, c = clips[r["cid"]]
-        shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, r["cid"]))
-        manifest().add(Clip(r["cid"], vcell, c.scene, _rel(config.clip_path(vcell, r["cid"])), c.n_frames, c.fps, c.width,
-                            c.height, generator=c.generator, parent=c.clip_id, meta={"variant": kind, **r["extra"]}))
-        if store is not None:
-            store.stage(config.clip_path(vcell, r["cid"]))
-        made.append(r["cid"])
+
+    def record(results):
+        for r in results:
+            if "error" in r:
+                log(f"[variants] {r['cid']} failed: {r['error']}")
+                continue
+            cell, vcell, c = clips[r["cid"]]
+            shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, r["cid"]))
+            manifest().add(Clip(r["cid"], vcell, c.scene, _rel(config.clip_path(vcell, r["cid"])), c.n_frames, c.fps, c.width,
+                                c.height, generator=c.generator, parent=c.clip_id, meta={"variant": kind, **r["extra"]}))
+            if store is not None:
+                store.stage(config.clip_path(vcell, r["cid"]))
+            made.append(r["cid"])
+        _flush(store, msg=f"c44: variants {kind} ({len(made)}/{len(jobs)})")
+
+    if jobs:
+        n = n_jobs or _default_workers()
+        log(f"[variants] {kind}: building {len(jobs)} clips on {min(n, len(jobs))} processes, {chunk} per commit  [{_resources()}]")
+        for i in range(0, len(jobs), chunk):
+            part = jobs[i:i + chunk]
+            if n <= 1 or len(part) <= 1:
+                res = [_variant_worker(j) for j in part]
+            else:
+                res = run_pool(_variant_worker, part, n, log=log, label=f"variants {kind} {i + len(part)}/{len(jobs)}")
+            record(res)
+    else:
+        _flush(store, msg=f"c44: variants {kind}")
     log(f"[variants] {kind}: {len(made)} clips")
-    _flush(store, msg=f"c44: variants {kind}")
     return made
+
+
+def _default_workers() -> int:
+    """CPU workers for the clip-making pools. Leave cores free for the notebook server: with every core busy, a molab session
+    was reset in the middle of the attack stage."""
+    import os
+    return max(1, min((os.cpu_count() or 2) - 6, 12))
+
+
+def _resources() -> str:
+    """One-line RAM / disk / load snapshot for the progress lines (best effort)."""
+    import os
+    import shutil as sh
+    out = []
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        out.append(f"RAM {vm.used / 2**30:.0f}/{vm.total / 2**30:.0f} GiB")
+    except Exception:                                                  # noqa: BLE001
+        pass
+    for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = open(f).read().strip()
+            if v.isdigit() and int(v) < 2**50:
+                out.append(f"container limit {int(v) / 2**30:.0f} GiB")
+                break
+        except Exception:                                              # noqa: BLE001
+            pass
+    try:
+        out.append(f"disk free {sh.disk_usage(config.work_dir()).free / 2**30:.0f} GiB")
+        out.append(f"load {os.getloadavg()[0]:.0f}")
+    except Exception:                                                  # noqa: BLE001
+        pass
+    return ", ".join(out)
 
 
 def _call_indexed(args):
@@ -699,9 +741,9 @@ def run_pool(fn, jobs, n: int, log: Log = print, label: str = "pool", every: int
         k = len(done)
         if k % every == 0 or k == len(jobs):
             el = (time.time() - t0) / 60
-            log(f"[{label}] {k}/{len(jobs)}  {el:.1f} min  (about {el / k * (len(jobs) - k):.0f} min left)")
+            log(f"[{label}] {k}/{len(jobs)}  {el:.1f} min  (about {el / k * (len(jobs) - k):.0f} min left)  [{_resources()}]")
 
-    pool = mp.get_context("spawn").Pool(min(n, len(jobs)), initializer=_phys_init)
+    pool = mp.get_context("spawn").Pool(min(n, len(jobs)), initializer=_phys_init, maxtasksperchild=25)     # recycle workers
     try:
         it = pool.imap_unordered(_call_indexed, [(fn, i, j) for i, j in enumerate(jobs)], chunksize=1)
         for _ in jobs:
@@ -738,8 +780,13 @@ def run_pool(fn, jobs, n: int, log: Log = print, label: str = "pool", every: int
 
 
 def _phys_init() -> None:
+    import os
     import cv2
     cv2.setNumThreads(1)                              # one thread per worker: no oversubscription
+    try:
+        os.nice(10)                                   # the notebook server keeps priority over the workers
+    except (AttributeError, OSError):
+        pass
 
 
 def _phys_worker(job: tuple[str, str]) -> dict:
@@ -765,12 +812,13 @@ def physics_features(store: Store | None = None, log: Log = print, n_jobs: int |
     if jobs:
         rows = []
 
-        def keep(row):                                             # partial results survive a crash or a session restart
+        def keep(row):                                             # partial results survive a crash or a session reset
             rows.append(row)
             if len(rows) % 500 == 0:
                 pd.concat([df, pd.DataFrame(rows)], ignore_index=True).to_csv(out, index=False)
+                _flush(store, [out], f"c44: physics features (partial, {len(rows)})")
 
-        run_pool(_phys_worker, jobs, n_jobs or max(1, (os.cpu_count() or 2) - 1), log=log, label="physics", every=200, on_result=keep)
+        run_pool(_phys_worker, jobs, n_jobs or _default_workers(), log=log, label="physics", every=200, on_result=keep)
         df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
         df.to_csv(out, index=False)
     _flush(store, [out], "c44: physics features")

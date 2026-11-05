@@ -68,7 +68,7 @@ def _save(path: Path, ids: list[str], emb: list[np.ndarray]) -> None:
     tmp.replace(path)
 
 
-def embed_clips(embedder, clips, path: Path, log=print, chunk: int = 64, workers: int = 4) -> int:
+def embed_clips(embedder, clips, path: Path, log=print, chunk: int = 64, workers: int = 4, push=None) -> int:
     """Embed every clip in `clips` that is not yet in `path` (mean over its sampled frames); returns the number added."""
     ids, emb = [], []
     if path.exists():
@@ -95,6 +95,8 @@ def embed_clips(embedder, clips, path: Path, log=print, chunk: int = 64, workers
             _save(path, ids, emb)
             if (i // chunk) % 8 == 7:
                 log(f"[embed:{embedder.name}] {min(i + chunk, len(todo))}/{len(todo)}")
+                if push:
+                    push()                                      # keep partial embeddings on HF in case the session is reset
     return added
 
 
@@ -112,7 +114,8 @@ def run(store: Store | None = None, log=print, backbones=("clip", "npr")) -> dic
         path = pipeline.results_dir() / f"{name}_embeddings.npz"
         try:
             emb = ClipEmbedder() if name == "clip" else NPREmbedder()
-            out[name] = embed_clips(emb, clips, path, log=log)
+            out[name] = embed_clips(emb, clips, path, log=log,
+                                    push=lambda p=path, n=name: pipeline._flush(store, [p], f"c44: {n} embeddings (partial)"))
             del emb
             pipeline._release_gpu()
         except Exception as e:                                  # noqa: BLE001 - one backbone failing must not stop the other

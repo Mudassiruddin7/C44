@@ -114,6 +114,11 @@ def test_full_pipeline_with_fakes(work, monkeypatch):
     assert len(pipeline.build_variants("crf28", cells=("RC", "GR"), n_jobs=1)) == 2 * N_SCENES
     assert len(pipeline.build_variants("blurcal", cells=("RC", "GR"), n_jobs=1)) == N_SCENES     # attacks skip real clips
     assert pipeline.build_variants("blurcal", cells=("RC", "GR"), n_jobs=1) == []                 # resumable
+    calls, real_flush = [], pipeline._flush                                                        # chunked commits: a session reset loses little
+    monkeypatch.setattr(pipeline, "_flush", lambda *a, **k: calls.append(1))
+    made = pipeline.build_variants("crf35", cells=("RC", "GR"), n_jobs=1, chunk=7)
+    assert len(made) == 2 * N_SCENES and len(calls) == -(-2 * N_SCENES // 7)                        # one commit per chunk of 7
+    monkeypatch.setattr(pipeline, "_flush", real_flush)
     monkeypatch.setenv("C44_RECALIBRATE", "1")                                         # exercise the measurement itself
     assert 0 < pipeline.blur_exposure() <= 0.5
     nc = pipeline.build_variants("noiseadapt", cells=("RC", "GR"), limit_scenes=3, n_jobs=1)     # attacks run on a subset
