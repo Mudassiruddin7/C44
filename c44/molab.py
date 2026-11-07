@@ -20,7 +20,7 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v17.5-chunks"
+VERSION = "v17.6-step7"
 ATTACK_N = 150     # scenes for the camera-aware attacks (all scenes of the full run)
 CONTROL_N = 100    # scenes for the supersampled-render resolution control
 
@@ -184,6 +184,12 @@ def run(stage: str, n_scenes: int | None = None):
         return pd.read_csv(config.work_dir() / "results" / "report.csv").round(3)
     if stage == "control":
         _need(["control", "--n", str(min(n_scenes or CONTROL_N, CONTROL_N))])
+        return None
+    if stage == "lite":                             # for a run that only needs step 7 + 8: no VGGT / FlashWorld / gsplat, no geometry
+        setup_env.require_gpu()
+        setup_env.install_base()
+        setup_env.install_npr()
+        _need(["pull", "--lite"])
         return None
     if stage == "physics":                          # CPU physics cues, then the CLIP / NPR backbone embeddings (GPU)
         _need(["physics"])

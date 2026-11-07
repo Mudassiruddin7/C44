@@ -6,13 +6,23 @@ import argparse
 import json
 
 
+# What `pull` restores from the HF repo. Current variant cells only (not the retired ones). `--lite` skips the 7 GiB of per-clip geometry
+# (meta/*), which the physics / embedding / analysis steps do not read.
+PULL_LITE = ["manifest.jsonl", "captions.json", "results/*",
+             "clips/RC/*", "clips/GR/*", "clips/RR/*", "clips/GRs/*", "clips/RRs/*",
+             "clips/*@crf*/*", "clips/*@blurcal/*", "clips/*@noiseadapt/*", "clips/*@blurcal+noiseadapt/*", "clips/*@aecal/*",
+             "clips/*@blurcal+noiseadapt+aecal/*", "clips/*@nz-*/*"]
+PULL_FULL = PULL_LITE + ["meta/RC/*", "meta/GR/*", "meta/RR/*"]
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="c44")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("env", help="print the environment report")
     s = sub.add_parser("setup", help="CUDA compiler, gsplat, VGGT, FlashWorld, NPR")
     s.add_argument("--no-runfile", action="store_true", help="never download the 5.4 GB CUDA toolkit")
-    sub.add_parser("pull", help="restore outputs from the HF repo into the work dir")
+    s = sub.add_parser("pull", help="restore outputs from the HF repo into the work dir")
+    s.add_argument("--lite", action="store_true", help="skip the per-clip geometry (not needed for physics / embeddings / analysis)")
     s = sub.add_parser("rc", help="real camera clips")
     s.add_argument("--n", type=int, required=True)
     s.add_argument("--seed", type=int, default=0)
@@ -63,11 +73,7 @@ def main(argv: list[str] | None = None) -> None:
         setup_env.install_flashworld()
         print(json.dumps(setup_env.report(), indent=1))
     elif a.cmd == "pull":
-        # the manifest, tables, base clips and geometry; not the thousands of recompression/attack variant clips
-        print(store.pull(["manifest.jsonl", "captions.json", "results/*", "meta/RC/*", "meta/GR/*", "meta/RR/*",
-                          "clips/RC/*", "clips/GR/*", "clips/RR/*", "clips/GRs/*", "clips/RRs/*",
-                          "clips/*@crf*/*", "clips/*@blurcal/*", "clips/*@noiseadapt/*", "clips/*@blurcal+noiseadapt/*", "clips/*@aecal/*",
-                          "clips/*@blurcal+noiseadapt+aecal/*", "clips/*@nz-*/*"]))       # current variants only, not the retired ones
+        print(store.pull(PULL_LITE if a.lite else PULL_FULL))
     elif a.cmd == "rc":
         store.ensure_repo()
         pipeline.build_rc(a.n, a.seed, store)

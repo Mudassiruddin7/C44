@@ -14,3 +14,15 @@ def test_variant_geometry_falls_back_to_the_parent(tmp_path, monkeypatch):
     assert pipeline._meta_of(var) == own                                               # its own copy wins when it exists
     base = Clip("GR_ab", "GR", "ab", "clips/GR/GR_ab.mp4", 48, 30.0, 704, 480)
     assert pipeline._meta_of(base) == config.meta_path("GR", "GR_ab")
+
+
+def test_lite_pull_skips_geometry_and_lite_stage_order(monkeypatch):
+    from c44 import cli, molab, setup_env
+    assert not any(p.startswith("meta/") for p in cli.PULL_LITE) and "meta/RC/*" in cli.PULL_FULL
+    assert "clips/*@nz-*/*" in cli.PULL_LITE and "clips/*@aecal/*" in cli.PULL_LITE
+    calls = []
+    for name in ("require_gpu", "install_base", "install_npr"):
+        monkeypatch.setattr(setup_env, name, lambda n=name: calls.append(n))
+    monkeypatch.setattr(molab, "_need", lambda args: calls.append(" ".join(args)))
+    molab.run("lite")
+    assert calls == ["require_gpu", "install_base", "install_npr", "pull --lite"]

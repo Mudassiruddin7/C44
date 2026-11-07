@@ -814,11 +814,11 @@ def physics_features(store: Store | None = None, log: Log = print, n_jobs: int |
 
         def keep(row):                                             # partial results survive a crash or a session reset
             rows.append(row)
-            if len(rows) % 500 == 0:
+            if len(rows) % 100 == 0:
                 pd.concat([df, pd.DataFrame(rows)], ignore_index=True).to_csv(out, index=False)
                 _flush(store, [out], f"c44: physics features (partial, {len(rows)})")
 
-        run_pool(_phys_worker, jobs, n_jobs or _default_workers(), log=log, label="physics", every=200, on_result=keep)
+        run_pool(_phys_worker, jobs, n_jobs or min(_default_workers(), 8), log=log, label="physics", every=50, on_result=keep)
         df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
         df.to_csv(out, index=False)
     _flush(store, [out], "c44: physics features")
