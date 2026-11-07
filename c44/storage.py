@@ -46,6 +46,31 @@ class Store:
         self._pending.clear()
         return n
 
+    def upload_file(self, local: str | Path, path_in_repo: str, retries: int = 3) -> tuple[bool, str]:
+        """Upload one (possibly large) file, e.g. the results zip, and verify that it is listed in the repo afterwards.
+        Never raises: returns (ok, message), so a Hub problem cannot lose the local copy or abort a notebook."""
+        import time
+        local = Path(local)
+        if not self.enabled:
+            return False, "no HF repo/token set: the file stays local only"
+        if not local.exists():
+            return False, f"{local} does not exist"
+        last = ""
+        for attempt in range(1, retries + 1):
+            try:
+                from huggingface_hub import HfApi
+                api = HfApi(token=self.token)
+                api.create_repo(self.repo_id, repo_type="dataset", private=True, exist_ok=True)
+                api.upload_file(path_or_fileobj=str(local), path_in_repo=path_in_repo, repo_id=self.repo_id, repo_type="dataset",
+                                commit_message=f"c44: {path_in_repo}")
+                if path_in_repo in set(api.list_repo_files(self.repo_id, repo_type="dataset")):
+                    return True, f"uploaded {local.name} ({local.stat().st_size / 2**20:.1f} MiB) to hf://datasets/{self.repo_id}/{path_in_repo}"
+                last = "upload returned but the file is not listed in the repo"
+            except Exception as e:                                          # noqa: BLE001
+                last = repr(e)
+            time.sleep(5 * attempt)
+        return False, f"upload failed after {retries} attempts: {last}"
+
     def pull(self, patterns: list[str] | None = None) -> Path:
         """Download repo contents (optionally filtered) into the work dir; returns the work dir."""
         if not self.enabled:

@@ -13,6 +13,9 @@ PULL_LITE = ["manifest.jsonl", "captions.json", "results/*",
              "clips/*@crf*/*", "clips/*@blurcal/*", "clips/*@noiseadapt/*", "clips/*@blurcal+noiseadapt/*", "clips/*@aecal/*",
              "clips/*@blurcal+noiseadapt+aecal/*", "clips/*@nz-*/*"]
 PULL_FULL = PULL_LITE + ["meta/RC/*", "meta/GR/*", "meta/RR/*"]
+# the weakness notebook: clean cells, the cells it compares against, and everything it builds (no control renders, no geometry)
+PULL_WEAK = ["manifest.jsonl", "captions.json", "results/*", "clips/RC/*", "clips/GR/*", "clips/RR/*", "clips/*@crf35/*",
+             "clips/*@blurcal+noiseadapt+aecal/*", "clips/*@nz-*/*", "clips/*@wk-*/*"]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -23,6 +26,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--no-runfile", action="store_true", help="never download the 5.4 GB CUDA toolkit")
     s = sub.add_parser("pull", help="restore outputs from the HF repo into the work dir")
     s.add_argument("--lite", action="store_true", help="skip the per-clip geometry (not needed for physics / embeddings / analysis)")
+    s.add_argument("--weak", action="store_true", help="only what the weakness notebook needs (smaller than --lite)")
     s = sub.add_parser("rc", help="real camera clips")
     s.add_argument("--n", type=int, required=True)
     s.add_argument("--seed", type=int, default=0)
@@ -44,7 +48,16 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--n", type=int, default=100)
     s.add_argument("--ss", type=int, default=3)
     sub.add_parser("physics", help="CPS-2 physics features of every clip (CPU, parallel)")
-    sub.add_parser("embed", help="CLIP and NPR backbone embeddings of every clip (for the retrained probes and the fusion)")
+    s = sub.add_parser("embed", help="CLIP and NPR backbone embeddings of every clip (for the retrained probes and the fusion)")
+    s.add_argument("--weak", action="store_true", help="also embed the c44.weak cells")
+    s = sub.add_parser("weak-attack", help="operator-family clips and attacker-ladder rungs (CPU, parallel, resumable)")
+    s.add_argument("--n", type=int, default=150, help="scenes")
+    s.add_argument("--kinds", default="", help="comma list of c44.weak variants (default: all)")
+    s = sub.add_parser("weak-features", help="CPS-2 + joint cues of the weak cells, joint cues of the other cells (CPU, parallel)")
+    s.add_argument("--no-old-j", action="store_true", help="skip the joint cues of the main run's clips")
+    s = sub.add_parser("weak-analyse", help="ladder, leave-one-family-out, joint-cue tables (CPU)")
+    s.add_argument("--boot", type=int, default=10000)
+    s.add_argument("--no-lofo", action="store_true")
     s = sub.add_parser("figures", help="paper figures from the analysis CSVs (needs matplotlib)")
     s.add_argument("--dir", required=True, help="folder with cps2_main.csv etc. (results/analysis)")
     s.add_argument("--out", default="figures")
@@ -52,11 +65,11 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("report", help="metrics table")
     a = p.parse_args(argv)
 
-    if a.cmd in ("physics", "robust"):                   # one BLAS/OpenMP thread per worker process
+    if a.cmd in ("physics", "robust", "weak-attack", "weak-features"):                   # one BLAS/OpenMP thread per worker process
         import os
         for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             os.environ[v] = "1"
-    if a.cmd in ("robust", "physics", "embed", "analyse", "evaluate", "control"):
+    if a.cmd in ("robust", "physics", "embed", "analyse", "evaluate", "control", "weak-attack", "weak-features", "weak-analyse"):
         import faulthandler
         import sys
         faulthandler.dump_traceback_later(900, repeat=True, file=sys.stderr)        # a stalled stage shows WHERE every 15 min
@@ -73,7 +86,7 @@ def main(argv: list[str] | None = None) -> None:
         setup_env.install_flashworld()
         print(json.dumps(setup_env.report(), indent=1))
     elif a.cmd == "pull":
-        print(store.pull(PULL_LITE if a.lite else PULL_FULL))
+        print(store.pull(PULL_WEAK if a.weak else PULL_LITE if a.lite else PULL_FULL))
     elif a.cmd == "rc":
         store.ensure_repo()
         pipeline.build_rc(a.n, a.seed, store)
@@ -122,10 +135,20 @@ def main(argv: list[str] | None = None) -> None:
             print(p)
     elif a.cmd == "embed":
         from . import embed
-        res = embed.run(store=store)
+        res = embed.run(store=store, with_weak=a.weak)
         print(res)
         if res.get("clip", 0) < 0:                       # the fusion detector needs CLIP: do not let the run end "successfully" without it
             raise SystemExit("CLIP embeddings FAILED (see the [embed:clip] message above); fix that before the analysis")
+    elif a.cmd == "weak-attack":
+        from . import weak
+        store.ensure_repo()
+        print(weak.run_attacks(store=store, n_scenes=a.n, kinds=[k for k in a.kinds.split(",") if k] or None))
+    elif a.cmd == "weak-features":
+        from . import weak
+        print(weak.run_features(store=store, joint_old=not a.no_old_j))
+    elif a.cmd == "weak-analyse":
+        from . import weak_analysis
+        print(weak_analysis.run(store=store, B=a.boot, lofo=not a.no_lofo))
     elif a.cmd == "physics":
         df = pipeline.physics_features(store=store)
         print(f"{len(df)} clips with physics features")

@@ -602,6 +602,12 @@ def _variant_worker(job: dict) -> dict:
             video.write_mp4(frames, job["out"], SPEC.fps, crf=int(job["param"]), preset=SPEC.preset)
             return {"cid": cid, "extra": extra}
         seed = zlib.crc32(cid.encode())
+        if op == "wk":                                                  # weakness experiments (c44.weak): operator families, attacker ladder
+            from . import weak
+            parent = video.read_video(job["parent_src"]) if job.get("parent_src") else None
+            frames, extra = weak.apply_variant(frames, job["param"], seed, parent)
+            video.write_mp4(frames, job["out"], SPEC.fps, SPEC.crf, SPEC.preset)
+            return {"cid": cid, "extra": extra}
         if op == "nuisance":
             frames, extra = attacks.nuisance(frames, job["param"], seed=seed)
             video.write_mp4(frames, job["out"], SPEC.fps, SPEC.crf, SPEC.preset)
@@ -635,14 +641,19 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
     motion is unchanged. Attacks run on the first `limit_scenes` scenes. Clips are made in parallel (CPU only), `chunk` at a
     time, and every chunk is recorded and pushed to the HF repo: if the notebook session is reset mid-way (it has been), at most
     one chunk of work is lost instead of the whole attack kind."""
-    op, param = VARIANTS[kind]
+    if kind in VARIANTS:
+        op, param = VARIANTS[kind]
+    else:
+        from . import weak
+        op, param = weak.VARIANTS[kind]
     done = _finished_parents()
     keep = subset_scenes(limit_scenes) if (limit_scenes and op != "compress") else None
     allc = manifest().load()
     exposure = blur_exposure(log=log) if "blurcal" in op else None          # calibrated once, before the workers start
     jobs, clips = [], {}
     for cell in cells:
-        if op not in ("compress", "nuisance") and cell == "RC":          # calibrated attacks exist for fakes; 'nz-*' also run on real
+        real_ok = op in ("compress", "nuisance") or (op == "wk" and param.get("real", False))
+        if cell == "RC" and not real_ok:                                 # calibrated attacks exist for fakes; 'nz-*' also run on real
             continue
         vcell = f"{cell}@{kind}"
         for c in manifest().by_cell(cell):
@@ -661,7 +672,8 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
                 log(f"[variants] {r['cid']} failed: {r['error']}")
                 continue
             cell, vcell, c = clips[r["cid"]]
-            shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, r["cid"]))
+            if config.meta_path(cell, c.clip_id).exists():               # absent after a --lite pull (geometry is not needed by the weak stages)
+                shutil.copy(config.meta_path(cell, c.clip_id), config.meta_path(vcell, r["cid"]))
             manifest().add(Clip(r["cid"], vcell, c.scene, _rel(config.clip_path(vcell, r["cid"])), c.n_frames, c.fps, c.width,
                                 c.height, generator=c.generator, parent=c.clip_id, meta={"variant": kind, **r["extra"]}))
             if store is not None:

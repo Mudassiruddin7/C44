@@ -40,6 +40,24 @@ python -m c44 robust --n 150 | control --n 100 | physics | analyse | report
 python -m c44 gv --limit 150        # experimental video-diffusion cell
 ```
 
+## Weakness experiments (v18, `c44_weak_molab.py`)
+
+A second notebook, run after the main one, attacks what the main run found weak: a camera-aware attacker (blur + noise + exposure matched to
+the real clip) defeats CPS-2, and the defences (SYM / RAT) only help against the operator families they were trained on. It needs the main
+run's clips and results in the HF repo, uses the CPU for everything except the CLIP / NPR embeddings of the new clips, and is resumable.
+
+| stage (`molab.run`) | command | what it does |
+|---|---|---|
+| `weak_lite` | `pull --weak` | light setup; pulls the clean cells, CRF 35, the main attacker, the `nz-*` clips and anything already built |
+| `weak_attack` | `weak-attack` | operator-family clips (`nz-tnr`, `nz-chroma`, `nz-sharpen`, `nz-rs`, `nz-optics`, `nz-denoise`, `nz-isp`, `nz-geo`, `nz-mix`; real **and** fake) and the attacker ladder `wk-L1..L3` (fakes only, noise / exposure matched to the paired real clip) |
+| `weak_features` | `weak-features` | CPS-2 + 8 joint cues of the new clips, joint cues of the main run's clips |
+| `weak_embed` | `embed --weak` | CLIP / NPR embeddings of the new clips (GPU) |
+| `weak_analyse` | `weak-analyse` | tables in `results/weak/` (ladder, leave-one-family-out, false alarms, paired tests, figure), then `c44_weak_results.zip` **uploaded to the HF repo** as `weak/c44_weak_results_<version>_<time>.zip` and `weak/c44_weak_results_latest.zip` |
+
+Code: `c44/weak.py` (operators, ladder, joint cues, feature stage), `c44/weak_analysis.py` (analysis), `c44/bootstats.py` (BCa scene-cluster
+bootstrap, shared with `improve_numbers.py` in the project folder). Tests: `tests/test_weak.py`.
+The notebook checks the GitHub code version first and stops with a clear message if the weakness stages have not been pushed.
+
 ## Repository layout
 
 ```

@@ -209,10 +209,10 @@ def _sharp_features(frames: np.ndarray, m: np.ndarray) -> dict:
     return {"sharp_resid_cv": float(resid.std()), "sharp_pump": float(spec.max() / (spec.mean() + _EPS))}
 
 
-def clip_physics(frames: np.ndarray) -> dict:
-    """All CPS-2 features of one clip (uint8 RGB [T,H,W,3])."""
+def clip_physics(frames: np.ndarray, mo: dict | None = None) -> dict:
+    """All CPS-2 features of one clip (uint8 RGB [T,H,W,3]). `mo` = flow_motion(frames) when the caller already has it."""
     out = {k: float("nan") for k in ALL}
-    mo = flow_motion(frames)
+    mo = mo if mo is not None else flow_motion(frames)
     parts = [
         lambda: cps.clip_features(frames, mo["m"], mo["direction"], mo["grid"]),
         lambda: _gain_features(frames, mo),

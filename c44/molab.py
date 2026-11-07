@@ -20,8 +20,9 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v17.7-clipfix"
+VERSION = "v18.0-weak"
 ATTACK_N = 150     # scenes for the camera-aware attacks (all scenes of the full run)
+LAST_UPLOAD: list[str] = []   # messages of the last results-zip upload to the HF repo (shown by the weakness notebook)
 CONTROL_N = 100    # scenes for the supersampled-render resolution control
 
 
@@ -205,6 +206,47 @@ def run(stage: str, n_scenes: int | None = None):
         _need(["physics"])
         _need(["embed"])
         return None
+    if stage == "weak_lite":                         # light setup + pull only what the weakness notebook needs
+        setup_env.require_gpu()
+        setup_env.install_base()
+        setup_env.install_npr()
+        ok, msg = _check_imports()
+        if not ok:
+            raise RuntimeError("the embedding stage cannot import its packages (nothing long was started):\n" + msg)
+        _need(["pull", "--weak"])
+        return None
+    if stage == "weak_attack":
+        _need(["weak-attack", "--n", str(n_scenes or 150)])
+        return None
+    if stage == "weak_features":
+        _need(["weak-features"])
+        return None
+    if stage == "weak_embed":
+        _need(["embed", "--weak"])
+        return None
+    if stage == "weak_analyse":
+        import datetime
+        _need(["weak-analyse"])
+        res = config.work_dir() / "results"
+        print((res / "weak" / "summary.md").read_text(encoding="utf-8"))
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        zip_path = shutil.make_archive(str(Path.cwd() / "c44_weak_results"), "zip", res, base_dir="weak")
+        # the feature tables are part of the result (they are what the analysis reads); add them to the zip next to the weak/ folder
+        import zipfile
+        with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as z:
+            for name in ("joint_features.csv", "physics_features_weak.csv"):
+                if (res / name).exists():
+                    z.write(res / name, name)
+        from .storage import Store
+        LAST_UPLOAD.clear()
+        ok, msg = Store().upload_file(zip_path, f"weak/c44_weak_results_{VERSION}_{stamp}.zip")
+        LAST_UPLOAD.append(("OK: " if ok else "NOT UPLOADED: ") + msg)
+        if ok:
+            _ok, _m = Store().upload_file(zip_path, "weak/c44_weak_results_latest.zip")
+            LAST_UPLOAD.append(("OK: " if _ok else "NOT UPLOADED: ") + _m)
+        print(chr(10).join("[HF] " + m for m in LAST_UPLOAD))
+        print(f"results zip: {zip_path}")
+        return zip_path
     if stage == "analyse":
         _need(["analyse"])
         res = config.work_dir() / "results"
@@ -220,4 +262,5 @@ def run(stage: str, n_scenes: int | None = None):
         print(f"results saved to {zip_path} - download it from the file browser before the session ends")
         print(pd.read_csv(res / "feature_auc.csv").round(3).to_string(index=False))
         return pd.read_csv(res / "report.csv").round(3)
-    raise ValueError("stage must be check, setup, smoke, pilot, evaluate, robust, control, physics, analyse or full")
+    raise ValueError("stage must be check, setup, smoke, pilot, evaluate, robust, control, physics, analyse, full or weak_lite / weak_attack / "
+                     "weak_features / weak_embed / weak_analyse")

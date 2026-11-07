@@ -100,16 +100,20 @@ def embed_clips(embedder, clips, path: Path, log=print, chunk: int = 64, workers
     return added
 
 
-def valid_clips():
-    """Every ok clip except retired attack variants (same rule as the physics features)."""
+def valid_clips(with_weak: bool = False):
+    """Every ok clip except retired attack variants (same rule as the physics features); with_weak adds the c44.weak cells."""
+    extra = set()
+    if with_weak:
+        from . import weak
+        extra = set(weak.VARIANTS)
     return [c for c in pipeline.manifest().load().values()
-            if c.status == "ok" and ("@" not in c.cell or c.cell.split("@")[1] in pipeline.VARIANTS)
+            if c.status == "ok" and ("@" not in c.cell or c.cell.split("@")[1] in pipeline.VARIANTS or c.cell.split("@")[1] in extra)
             and pipeline._abs(c.path).exists()]
 
 
-def run(store: Store | None = None, log=print, backbones=("clip", "npr")) -> dict:
+def run(store: Store | None = None, log=print, backbones=("clip", "npr"), with_weak: bool = False) -> dict:
     out = {}
-    clips = valid_clips()
+    clips = valid_clips(with_weak)
     for name in backbones:
         path = pipeline.results_dir() / f"{name}_embeddings.npz"
         try:
