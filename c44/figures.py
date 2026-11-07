@@ -73,7 +73,8 @@ def fig_attacks(table: pd.DataFrame, path: Path) -> None:
     cols = [("CPS-2 supervised", "CPS-2", "#8a8f94"),
             ("CPS-2 + CLIP", "CPS-2 + CLIP", "#1f5f8b"),
             ("CPS-2 + CLIP + RAT (components unseen)", "+ RAT, components unseen", "#c0504d"),
-            ("CPS-2 + CLIP + RAT", "+ RAT (randomised-attacker training)", "#d9a441"),
+            ("CPS-2 + CLIP + RAT", "+ RAT (fakes only: flags processed real clips)", "#d9a441"),
+            ("CPS-2 + CLIP + SYM", "+ SYM (operators on real clips too)", "#8e6bbf"),
             ("CPS-2 + CLIP + aug (attack seen)", "+ trained on this attack", "#5b9a68")]
     cols = [c for c in cols if c[0] in table.columns]
     if len(cols) < 3:                                           # no fusion / RAT in this table: fall back to CPS-2 variants
@@ -96,7 +97,7 @@ def fig_attacks(table: pd.DataFrame, path: Path) -> None:
     axes[0].set_ylabel("AUC (real vs attacked fake)")
     axes[0].set_ylim(0, 1.02)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, ncol=3, loc="outside upper center", frameon=False, fontsize=7)
+    fig.legend(handles, labels, ncol=2, loc="outside upper center", frameon=False, fontsize=7)
     fig.savefig(path, bbox_inches="tight")
     fig.savefig(path.with_suffix(".png"), bbox_inches="tight", dpi=200)
     plt.close(fig)

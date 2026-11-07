@@ -57,19 +57,21 @@ def _parse(df: pd.DataFrame) -> pd.DataFrame:
 
 def auc_ci(neg: pd.DataFrame, pos: pd.DataFrame, col: str, n_boot: int = 300, seed: int = 0):
     """AUC (higher `col` = more fake) with a scene-level bootstrap 95% CI."""
-    d = pd.concat([neg.assign(y=0), pos.assign(y=1)])
+    d = pd.concat([neg[["scene", col]].assign(y=0), pos[["scene", col]].assign(y=1)])      # only what the AUC needs: callers pass wide frames
     d = d[np.isfinite(d[col])]
     if d.y.nunique() < 2:
         return float("nan"), float("nan"), float("nan")
     a = _roc_auc(d.y, d[col])
     rng = np.random.default_rng(seed)
-    groups = {k: v for k, v in d.groupby("scene")}
+    groups = {k: (v.y.to_numpy(), v[col].to_numpy()) for k, v in d.groupby("scene")}
     keys = np.array(list(groups))
     bs = []
     for _ in range(n_boot):
-        b = pd.concat([groups[k] for k in rng.choice(keys, len(keys))])
-        if b.y.nunique() == 2:
-            bs.append(_roc_auc(b.y, b[col]))
+        pick = rng.choice(keys, len(keys))
+        y = np.concatenate([groups[k][0] for k in pick])
+        sc = np.concatenate([groups[k][1] for k in pick])
+        if len(np.unique(y)) == 2:
+            bs.append(_roc_auc(y, sc))
     lo, hi = np.percentile(bs, [2.5, 97.5]) if bs else (float("nan"), float("nan"))
     return a, float(lo), float(hi)
 
