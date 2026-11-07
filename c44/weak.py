@@ -362,6 +362,29 @@ def valid_cells(cell: str) -> tuple[bool, bool]:
     return (var in pipeline.VARIANTS or var in VARIANTS), (var in VARIANTS)
 
 
+def _time_first(job, n_jobs: int, n_workers: int, log) -> None:
+    """Run ONE clip in this process and log where the time goes, so a slow or stuck machine is visible in seconds (never raises)."""
+    import time
+    try:
+        from . import physics, video
+        cid, path, full = job
+        t0 = time.time()
+        frames = video.read_video(path)
+        t1 = time.time()
+        mo = physics.flow_motion(frames)
+        t2 = time.time()
+        if full:
+            physics.clip_physics(frames, mo)
+        t3 = time.time()
+        joint_features(frames, mo)
+        t4 = time.time()
+        per = (t4 - t0)
+        log(f"[weak:features] timing on {cid}: read {t1 - t0:.1f}s, flow {t2 - t1:.1f}s, CPS-2 {t3 - t2:.1f}s, joint {t4 - t3:.1f}s "
+            f"(one clip, one process) -> roughly {per * n_jobs / max(n_workers, 1) / 60:.0f} min for {n_jobs} clips on {n_workers} workers")
+    except Exception as e:                                                # noqa: BLE001
+        log(f"[weak:features] timing probe failed (continuing): {e!r}")
+
+
 def run_features(store=None, log=print, n_jobs: int | None = None, joint_old: bool = True) -> dict:
     """results/joint_features.csv (J of every clip) and results/physics_features_weak.csv (CPS-2 of the weak cells). Resumable; partial
     results are pushed to the HF repo every 100 clips."""
@@ -405,12 +428,13 @@ def run_features(store=None, log=print, n_jobs: int | None = None, joint_old: bo
             save()
 
     if jobs:
-        n = n_jobs or min(pipeline._default_workers(), 8)
+        n = n_jobs or pipeline._default_workers()
+        _time_first(jobs[0], len(jobs), n, log)
         if n <= 1:                                                         # one worker: no pool (nothing to hang), same bookkeeping
             for j in jobs:
                 keep(_feat_worker(j))
         else:
-            pipeline.run_pool(_feat_worker, jobs, n, log=log, label="weak features", every=50, on_result=keep)
+            pipeline.run_pool(_feat_worker, jobs, n, log=log, label="weak features", every=20, on_result=keep)
     dj, dp = save(final=True)
     return {"joint": len(dj), "physics_weak": len(dp)}
 

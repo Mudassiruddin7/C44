@@ -736,6 +736,9 @@ def _call_indexed(args):
     return i, fn(job)
 
 
+POOL_HEARTBEAT = 60.0         # seconds of silence after which run_pool logs 'still working' (the hung-pool fallback is `timeout`)
+
+
 def run_pool(fn, jobs, n: int, log: Log = print, label: str = "pool", every: int = 20, timeout: float = 300.0, on_result=None) -> list:
     """Map `fn` over `jobs` (CPU work) in a SPAWN-based process pool and return the results in job order.
 
@@ -758,8 +761,18 @@ def run_pool(fn, jobs, n: int, log: Log = print, label: str = "pool", every: int
     pool = mp.get_context("spawn").Pool(min(n, len(jobs)), initializer=_phys_init, maxtasksperchild=25)     # recycle workers
     try:
         it = pool.imap_unordered(_call_indexed, [(fn, i, j) for i, j in enumerate(jobs)], chunksize=1)
+        step = min(timeout, POOL_HEARTBEAT)
         for _ in jobs:
-            i, r = it.next(timeout=timeout)
+            idle = 0.0
+            while True:
+                try:
+                    i, r = it.next(timeout=step)
+                    break
+                except mp.TimeoutError:
+                    idle += step
+                    if idle >= timeout:
+                        raise                                           # -> the hung-pool fallback below
+                    log(f"[{label}] still working: {len(done)}/{len(jobs)} done, {idle:.0f} s since the last result  [{_resources()}]")
             done[i] = r
             if on_result:
                 on_result(r)

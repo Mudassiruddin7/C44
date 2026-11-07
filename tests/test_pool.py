@@ -33,6 +33,20 @@ def test_run_pool_watchdog_finishes_a_hung_pool_in_threads():
     assert any("looks hung" in m for m in logs)
 
 
+def _slow(x):
+    import time
+    time.sleep(3)
+    return x + 1
+
+
+def test_run_pool_logs_a_heartbeat_while_waiting_and_does_not_fall_back(monkeypatch):
+    monkeypatch.setattr(pipeline, "POOL_HEARTBEAT", 1.0)
+    logs = []
+    out = pipeline.run_pool(_slow, [1, 2], n=2, log=logs.append, label="hb", timeout=30)
+    assert out == [2, 3]
+    assert any("still working" in m for m in logs) and not any("looks hung" in m for m in logs)
+
+
 def test_entry_point_does_not_run_the_cli_when_imported_by_a_worker(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["c44", "robust", "--n", "1"])
     runpy.run_module("c44.__main__", run_name="__mp_main__")          # unguarded, this would parse argv and start the stage
