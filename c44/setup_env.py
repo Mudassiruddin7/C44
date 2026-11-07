@@ -243,7 +243,8 @@ def _cccl_include_dirs() -> list[str]:
 
 def install_base() -> None:
     """Small pure-python deps the pipeline needs (never touches torch)."""
-    pip_install("av", "imageio-ffmpeg", "plyfile", "scipy", "scikit-learn", "pandas", "huggingface_hub", "einops", "safetensors")
+    # huggingface_hub < 2: the transformers in the molab image refuses to import (CLIP) with huggingface-hub 2.x
+    pip_install("av", "imageio-ffmpeg", "plyfile", "scipy", "scikit-learn", "pandas", "huggingface_hub>=1.5,<2", "einops", "safetensors")
 
 
 def install_gsplat() -> None:

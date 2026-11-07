@@ -122,7 +122,10 @@ def main(argv: list[str] | None = None) -> None:
             print(p)
     elif a.cmd == "embed":
         from . import embed
-        print(embed.run(store=store))
+        res = embed.run(store=store)
+        print(res)
+        if res.get("clip", 0) < 0:                       # the fusion detector needs CLIP: do not let the run end "successfully" without it
+            raise SystemExit("CLIP embeddings FAILED (see the [embed:clip] message above); fix that before the analysis")
     elif a.cmd == "physics":
         df = pipeline.physics_features(store=store)
         print(f"{len(df)} clips with physics features")

@@ -1,5 +1,7 @@
 """Resuming in a fresh session: variant clips come back from the HF repo, their geometry files do not."""
 
+import pytest
+
 from c44 import config, pipeline
 from c44.manifest import Clip
 
@@ -24,5 +26,11 @@ def test_lite_pull_skips_geometry_and_lite_stage_order(monkeypatch):
     for name in ("require_gpu", "install_base", "install_npr"):
         monkeypatch.setattr(setup_env, name, lambda n=name: calls.append(n))
     monkeypatch.setattr(molab, "_need", lambda args: calls.append(" ".join(args)))
+    monkeypatch.setattr(molab, "_check_imports", lambda: (True, ""))
     molab.run("lite")
     assert calls == ["require_gpu", "install_base", "install_npr", "pull --lite"]
+    monkeypatch.setattr(molab, "_check_imports", lambda: (False, "ImportError: huggingface-hub>=1.5.0,<2.0 is required"))
+    calls.clear()
+    with pytest.raises(RuntimeError, match="cannot import"):
+        molab.run("lite")
+    assert "pull --lite" not in calls                                   # fails before anything long starts

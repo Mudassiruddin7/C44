@@ -20,7 +20,7 @@ from pathlib import Path
 from . import config, pipeline, setup_env
 from .storage import Store
 
-VERSION = "v17.6-step7"
+VERSION = "v17.7-clipfix"
 ATTACK_N = 150     # scenes for the camera-aware attacks (all scenes of the full run)
 CONTROL_N = 100    # scenes for the supersampled-render resolution control
 
@@ -59,6 +59,13 @@ def _need(args: list[str]) -> None:
     rc, tail = _stage(args)
     if rc != 0:
         raise RuntimeError(f"stage `{' '.join(args)}` failed (exit {rc}). Last output:\n{tail}")
+
+
+def _check_imports() -> tuple[bool, str]:
+    """Can a fresh process import everything the embedding stage needs? Catches package conflicts in seconds, not after an hour."""
+    code = "from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection; import torch, torchvision, sklearn, pandas, cv2, av"
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    return p.returncode == 0, (p.stderr or "").strip()[-600:]
 
 
 def _cell_errors(cell: str) -> list[str]:
@@ -189,6 +196,9 @@ def run(stage: str, n_scenes: int | None = None):
         setup_env.require_gpu()
         setup_env.install_base()
         setup_env.install_npr()
+        ok, msg = _check_imports()
+        if not ok:
+            raise RuntimeError("the embedding stage cannot import its packages (nothing long was started):\n" + msg)
         _need(["pull", "--lite"])
         return None
     if stage == "physics":                          # CPU physics cues, then the CLIP / NPR backbone embeddings (GPU)
