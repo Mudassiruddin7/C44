@@ -282,3 +282,83 @@ def test_weak_stage_arguments_and_cli_parsing(monkeypatch):
             cli.main(cmd + ["--help"])                                    # argparse accepted the arguments (--help exits 0 after parsing)
         assert e.value.code == 0
     assert cli.PULL_WEAK and all(p in cli.PULL_WEAK for p in ("clips/*@nz-*/*", "clips/*@wk-*/*", "results/*", "manifest.jsonl"))
+
+
+# ----------------------------------------------------------------------------- the detached job (survives a notebook refresh)
+def test_job_runs_detached_logs_and_a_second_start_attaches(work):
+    import sys
+
+    from c44 import weak_job
+    cmd = [sys.executable, "-u", "-c", "import time; print('hello from the job', flush=True); time.sleep(6); print('bye', flush=True)"]
+    st = weak_job.start(150, cmd=cmd)
+    assert st["state"] == "running" and weak_job.alive(st["pid"]) and weak_job.is_running()
+    again = weak_job.start(150, cmd=["python", "-c", "raise SystemExit('must not start a second job')"])
+    assert again["pid"] == st["pid"]                                      # attached to the live job instead of starting another
+    lines = []
+    final = weak_job.follow(poll=0.5, out=lines.append)
+    text = "\n".join(lines)
+    assert "hello from the job" in text and "bye" in text
+    assert final["state"] == "ended" and "recycled" in final["error"]     # this stand-in job never wrote done/failed: reported, not hung
+    assert not weak_job.is_running()
+
+
+def test_job_state_survives_a_new_process_view_and_zombie_is_not_alive(work):
+    from c44 import weak_job
+    weak_job.write_state(state="running", pid=2 ** 22 + 12345, step="weak_features")       # a pid that does not exist
+    assert not weak_job.is_running() and weak_job.read_state()["step"] == "weak_features"
+    assert not weak_job.alive(None) and not weak_job.alive(0)
+
+
+def test_run_steps_skips_a_failing_nonfatal_step_and_stops_on_a_fatal_one(work):
+    from c44 import weak_job
+    seen = []
+
+    def runner(stage, **kw):
+        seen.append((stage, kw))
+        if stage == "weak_embed":
+            raise RuntimeError("CLIP failed")
+        return "/x/c44_weak_results.zip" if stage == "weak_analyse" else None
+
+    weak_job.write_state(n_scenes=6)
+    st = weak_job.run_steps(runner, log=lambda *_: None)
+    assert [s for s, _ in seen] == ["weak_attack", "weak_features", "weak_embed", "weak_analyse"] and seen[0][1] == {"n_scenes": 6}
+    assert st["state"] == "done" and st["zip"].endswith("c44_weak_results.zip")
+
+    seen.clear()
+
+    def boom(stage, **kw):
+        seen.append(stage)
+        if stage == "weak_features":
+            raise RuntimeError("disk full")
+
+    st = weak_job.run_steps(boom, log=lambda *_: None)
+    assert st["state"] == "failed" and "weak_features" in st["error"] and seen == ["weak_attack", "weak_features"]
+
+
+def test_job_stage_in_molab_returns_the_zip_and_reports_upload_status(work, monkeypatch):
+    from c44 import molab, weak_job
+    monkeypatch.setattr(weak_job, "start", lambda n, cmd=None: {"state": "running"})
+    monkeypatch.setattr(weak_job, "follow", lambda: {"state": "done", "zip": "/z.zip", "upload": ["OK: uploaded"]})
+    assert molab.run("weak_job", n_scenes=6) == "/z.zip" and molab.LAST_UPLOAD == ["OK: uploaded"]
+    monkeypatch.setattr(weak_job, "follow", lambda: {"state": "failed", "error": "weak_features: boom"})
+    with pytest.raises(RuntimeError, match="boom"):
+        molab.run("weak_job", n_scenes=6)
+
+
+def test_push_failures_are_retried_and_tolerated(work, monkeypatch):
+    from c44 import pipeline
+    from c44.storage import Store
+
+    class Flaky(Store):
+        def __init__(self):
+            super().__init__(repo_id="a/b", token="t")
+            self.calls = 0
+
+        def flush(self, message="x"):
+            self.calls += 1
+            raise RuntimeError("429 rate limit")
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    s = Flaky()
+    pipeline._flush(s, [], "msg")                                         # must not raise
+    assert s.calls == 3

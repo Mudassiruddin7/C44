@@ -62,8 +62,8 @@ def _(code_msg, code_ok, mo, molab):
         3. **Joint cues** (CPS-3) that couple blur, noise and motion inside the frame.
         4. Paired statistics (BCa scene bootstrap, Holm), tables, a figure, one zip.
 
-        Everything is resumable: finished clips and features are pushed to your HF repo every 100 clips, so a reset costs little - just
-        press the button again. Expect about 3-4 hours for 150 scenes (6 scenes = a 20-minute smoke test).
+        The work runs as a **detached background job**: refreshing this page does not stop it - press the button again and it re-attaches.
+        Everything is resumable: clips and features are pushed to your HF repo every 25-100 items, so even a recycled container costs little. Expect about 3-4 hours for 150 scenes (6 scenes = a 20-minute smoke test).
         The results zip is uploaded to the repo as `weak/c44_weak_results_latest.zip` (and a time-stamped copy) and is also offered below.
 
         **Hugging Face token** (hf_..., write access to the repo) {token}
@@ -113,16 +113,16 @@ def _(code_ok, form, mo, molab, os):
 
     zip_path = None
     try:
-        _step("1/6 check", "check", fatal=False)
-        _step("2/6 light setup + pull the clips and results you already have from HF", "weak_lite")
-        _step(f"3/6 operator-family clips + attacker ladder for {_n} scenes (CPU, parallel; pushed every 100 clips)", "weak_attack", n_scenes=_n)
-        _step("4/6 CPS-2 + joint cues of the new clips, joint cues of the main run's clips (CPU)", "weak_features")
-        _step("5/6 CLIP / NPR embeddings of the new clips (GPU; if this fails the analysis still runs without the CLIP-based detectors)",
-              "weak_embed", fatal=False)
-        zip_path = _step("6/6 analysis, results zip, upload to HF", "weak_analyse")
+        _step("1/3 check", "check", fatal=False)
+        if molab.run("weak_job_running"):
+            print("\nA weakness job is already running in this session (the notebook was refreshed). Re-attaching to it; nothing is restarted.")
+        else:
+            _step("2/3 light setup + pull the clips and results you already have from HF (resumes whatever was pushed before)", "weak_lite")
+        zip_path = _step(f"3/3 detached job for {_n} scenes: operator-family clips + attacker ladder -> features -> embeddings -> analysis -> zip -> HF "
+                         "(survives a notebook refresh; progress is pushed to HF every 25-100 items)", "weak_job", n_scenes=_n)
         print("\nALL DONE")
     except Exception:
-        print("\nSTOPPED. Everything finished so far is on your HF repo; press the button again to resume.")
+        print("\nSTOPPED. Everything finished so far is on your HF repo; press the button again to resume (or to re-attach if the job is still alive).")
     return failures, zip_path
 
 

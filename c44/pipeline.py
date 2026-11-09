@@ -58,7 +58,15 @@ def _flush(store: Store | None, extra: list[Path] = (), msg: str = "c44") -> Non
     for p in [config.work_dir() / "manifest.jsonl", *extra]:
         if Path(p).exists():
             store.stage(p)
-    store.flush(msg)
+    import time
+    for attempt in range(1, 4):
+        try:
+            store.flush(msg)
+            return
+        except Exception as e:                                            # noqa: BLE001 - hours of CPU work must not die on a Hub hiccup
+            print(f"[push] HF commit failed (attempt {attempt}/3): {e!r}", flush=True)
+            time.sleep(5 * attempt)
+    print("[push] giving up for now: the files stay queued and go out with the next push; they are safe on local disk", flush=True)
 
 
 def _finished(cell: str, key: str = "scene") -> set[str]:

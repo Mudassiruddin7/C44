@@ -93,7 +93,7 @@ def embed_clips(embedder, clips, path: Path, log=print, chunk: int = 64, workers
                 emb.append(feats[a:b].mean(0))
             added += len(part)
             _save(path, ids, emb)
-            if (i // chunk) % 8 == 7:
+            if (i // chunk) % 2 == 1:                           # every 128 clips
                 log(f"[embed:{embedder.name}] {min(i + chunk, len(todo))}/{len(todo)}")
                 if push:
                     push()                                      # keep partial embeddings on HF in case the session is reset

@@ -38,7 +38,8 @@ class Store:
             self._pending.clear()
             return 0 if not self.enabled else n
         from huggingface_hub import CommitOperationAdd, HfApi
-        ops = [CommitOperationAdd(path_in_repo=p, path_or_fileobj=str(l)) for l, p in self._pending if l.exists()]
+        latest = {p: l for l, p in self._pending if l.exists()}              # a retried push may have queued a path twice: last one wins
+        ops = [CommitOperationAdd(path_in_repo=p, path_or_fileobj=str(l)) for p, l in latest.items()]
         if ops:
             HfApi(token=self.token).create_commit(self.repo_id, repo_type="dataset", operations=ops,
                                                   commit_message=message)

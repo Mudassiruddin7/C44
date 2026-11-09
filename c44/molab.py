@@ -215,6 +215,18 @@ def run(stage: str, n_scenes: int | None = None):
             raise RuntimeError("the embedding stage cannot import its packages (nothing long was started):\n" + msg)
         _need(["pull", "--weak"])
         return None
+    if stage == "weak_job_running":                  # is a detached weakness job alive in this container? (then do not set up / pull again)
+        from . import weak_job
+        return weak_job.is_running()
+    if stage == "weak_job":                          # start the detached pipeline (or attach to the live one) and follow its log
+        from . import weak_job
+        weak_job.start(n_scenes or 150)
+        st = weak_job.follow()
+        LAST_UPLOAD.clear()
+        LAST_UPLOAD.extend(st.get("upload") or [])
+        if st.get("state") != "done":
+            raise RuntimeError(f"the weakness job {st.get('state')}: {st.get('error', '')}")
+        return st.get("zip") or None
     if stage == "weak_attack":
         _need(["weak-attack", "--n", str(n_scenes or 150)])
         return None

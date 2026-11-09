@@ -414,7 +414,10 @@ def run_features(store=None, log=print, n_jobs: int | None = None, joint_old: bo
         b = pd.concat([dp, pd.DataFrame(rows_p)], ignore_index=True) if rows_p else dp
         a.to_csv(pj, index=False)
         b.to_csv(pp, index=False)
-        pipeline._flush(store, [pj, pp], "c44: weak features" + ("" if final else f" (partial, {len(rows_j)})"))
+        try:
+            pipeline._flush(store, [pj, pp], "c44: weak features" + ("" if final else f" (partial, {len(rows_j)})"))
+        except Exception as e:                                            # noqa: BLE001 - a Hub hiccup must not kill hours of work; the next push retries
+            log(f"[weak:features] push to HF failed ({e!r}); the local files are saved and the next push will retry")
         return a, b
 
     def keep(r):
@@ -424,7 +427,7 @@ def run_features(store=None, log=print, n_jobs: int | None = None, joint_old: bo
         rows_j.append({"clip_id": r["clip_id"], **{k: r.get(k, np.nan) for k in JOINT}})
         if r.get("full"):
             rows_p.append({"clip_id": r["clip_id"], **{k: r.get(k, np.nan) for k in list(physics.ALL) + ["motion_med"]}})
-        if len(rows_j) % 100 == 0:
+        if len(rows_j) % 25 == 0:                                            # about 40 s of work: a reset loses almost nothing
             save()
 
     if jobs:
