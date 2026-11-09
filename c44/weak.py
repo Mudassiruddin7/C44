@@ -431,7 +431,9 @@ def run_features(store=None, log=print, n_jobs: int | None = None, joint_old: bo
             save()
 
     if jobs:
-        n = n_jobs or pipeline._default_workers()
+        import os
+        # 6 workers by default (the first run used 8 and lasted 2.5 h; 12 died within minutes - memory is the suspect on molab). Override with C44_WEAK_WORKERS.
+        n = n_jobs or int(os.environ.get("C44_WEAK_WORKERS", "6"))
         _time_first(jobs[0], len(jobs), n, log)
         if n <= 1:                                                         # one worker: no pool (nothing to hang), same bookkeeping
             for j in jobs:
