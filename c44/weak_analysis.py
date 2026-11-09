@@ -326,7 +326,7 @@ def run(store=None, B: int = 10000, seed: int = 0, n_jobs: int | None = None, lo
     if store is not None:
         for p in files:
             store.stage(p)
-        store.flush("c44: weakness analysis")
+        store.push("c44: weakness analysis", force=True)                   # never raises: the tables are on disk and in the results zip
     return "\n".join(text)
 
 

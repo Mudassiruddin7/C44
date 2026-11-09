@@ -53,6 +53,16 @@ def work_dir() -> Path:
     return p
 
 
+def disk_free_gb(path: str | Path | None = None) -> float | None:
+    """Free disk space in GiB, or None when the sandbox reports no real figure (molab's gVisor says 2**63 bytes = 8.6e9 GiB)."""
+    import shutil
+    try:
+        free = shutil.disk_usage(path or work_dir()).free
+    except OSError:
+        return None
+    return None if free >= 2 ** 50 else free / 2 ** 30
+
+
 def clip_path(cell: str, clip_id: str) -> Path:
     p = work_dir() / "clips" / cell / f"{clip_id}.mp4"
     p.parent.mkdir(parents=True, exist_ok=True)

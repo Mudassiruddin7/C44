@@ -414,10 +414,8 @@ def run_features(store=None, log=print, n_jobs: int | None = None, joint_old: bo
         b = pd.concat([dp, pd.DataFrame(rows_p)], ignore_index=True) if rows_p else dp
         a.to_csv(pj, index=False)
         b.to_csv(pp, index=False)
-        try:
-            pipeline._flush(store, [pj, pp], "c44: weak features" + ("" if final else f" (partial, {len(rows_j)})"))
-        except Exception as e:                                            # noqa: BLE001 - a Hub hiccup must not kill hours of work; the next push retries
-            log(f"[weak:features] push to HF failed ({e!r}); the local files are saved and the next push will retry")
+        # saved to disk every 25 clips; pushed at most every few minutes (the Hub allows 128 commits/hour), and always at the end
+        pipeline._flush(store, [pj, pp], "c44: weak features" + ("" if final else f" (partial, {len(rows_j)})"), force=final)
         return a, b
 
     def keep(r):

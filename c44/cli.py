@@ -69,13 +69,14 @@ def main(argv: list[str] | None = None) -> None:
         import os
         for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
             os.environ[v] = "1"
-    if a.cmd in ("robust", "physics", "embed", "analyse", "evaluate", "control", "weak-attack", "weak-features", "weak-analyse"):
-        import faulthandler
-        import sys
-        faulthandler.dump_traceback_later(900, repeat=True, file=sys.stderr)        # a stalled stage shows WHERE every 15 min
     from . import pipeline, setup_env
     from .storage import Store
+    if a.cmd in ("robust", "physics", "embed", "analyse", "evaluate", "control", "weak-attack", "weak-features", "weak-analyse"):
+        pipeline.arm_watchdog()                                      # a stage that makes NO progress for 15 min shows WHERE (stacks), a healthy one stays quiet
     store = Store()
+    if store.enabled:
+        import atexit
+        atexit.register(lambda: store.push("c44: remaining outputs", force=True))      # whatever a throttled progress push held back
     if a.cmd == "env":
         print(json.dumps(setup_env.report(), indent=1))
     elif a.cmd == "setup":

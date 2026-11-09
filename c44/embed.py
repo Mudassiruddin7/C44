@@ -93,6 +93,7 @@ def embed_clips(embedder, clips, path: Path, log=print, chunk: int = 64, workers
                 emb.append(feats[a:b].mean(0))
             added += len(part)
             _save(path, ids, emb)
+            pipeline.watchdog_ping()
             if (i // chunk) % 2 == 1:                           # every 128 clips
                 log(f"[embed:{embedder.name}] {min(i + chunk, len(todo))}/{len(todo)}")
                 if push:
@@ -125,7 +126,7 @@ def run(store: Store | None = None, log=print, backbones=("clip", "npr"), with_w
         except Exception as e:                                  # noqa: BLE001 - one backbone failing must not stop the other
             log(f"[embed:{name}] FAILED: {e!r}")
             out[name] = -1
-        pipeline._flush(store, [path], f"c44: {name} embeddings")
+        pipeline._flush(store, [path], f"c44: {name} embeddings", force=True)
     return out
 
 

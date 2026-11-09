@@ -71,11 +71,14 @@ def start(n_scenes: int = 150, cmd: list[str] | None = None) -> dict:
     code_root = str(Path(__file__).resolve().parent.parent)
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "TQDM_DISABLE": "1", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
            "PYTHONPATH": os.pathsep.join(p for p in (code_root, os.environ.get("PYTHONPATH", "")) if p)}
+    remote = f"logs/weak_job_{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}.log"        # one file per run: a new run never overwrites a crash's log
+    env["C44_PUSH_LOG"] = f"{log}|{remote}"
     cmd = cmd or [sys.executable, "-u", "-m", "c44.weak_job", "--n", str(n_scenes)]
     with open(log, "a", encoding="utf-8") as fh:
         fh.write(f"\n===== weak job started {time.strftime('%Y-%m-%d %H:%M:%S')} (n_scenes={n_scenes}) =====\n")
         p = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env, cwd=str(Path.cwd()), start_new_session=True)
-    return write_state(state="running", pid=p.pid, step="starting", started=time.time(), n_scenes=n_scenes, error="", zip="", upload=[])
+    return write_state(state="running", pid=p.pid, step="starting", started=time.time(), n_scenes=n_scenes, error="", zip="", upload=[],
+                       remote_log=remote)
 
 
 def follow(poll: float = 5.0, tail_lines: int = 40, out=print, max_wait: float | None = None) -> dict:
@@ -124,17 +127,118 @@ def run_steps(runner, steps=STEPS, log=print) -> dict:
     return write_state(state="done", step="finished")
 
 
+def _read_first(path: str) -> str:
+    try:
+        return Path(path).read_text().strip()
+    except Exception:                                                     # noqa: BLE001
+        return ""
+
+
+def resource_line() -> str:
+    """One line: RAM, container limit, memory held by this job and all its workers, CPU, load, disk. Never raises."""
+    parts = []
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        parts.append(f"RAM {vm.used / 2**30:.1f}/{vm.total / 2**30:.0f} GiB ({vm.percent:.0f}%)")
+        me = psutil.Process()
+        kids = me.children(recursive=True)
+        rss = []
+        for q in [me, *kids]:
+            try:
+                rss.append(q.memory_info().rss)
+            except Exception:                                             # noqa: BLE001 - a worker exited between listing and reading
+                pass
+        parts.append(f"job tree {len(kids)} child procs, {sum(rss) / 2**30:.1f} GiB RSS (largest {max(rss, default=0) / 2**30:.2f} GiB)")
+        parts.append(f"cpu {psutil.cpu_percent(None):.0f}%")
+    except Exception:                                                     # noqa: BLE001
+        pass
+    for cur, lim in (("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max"),
+                     ("/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes")):
+        c, m = _read_first(cur), _read_first(lim)
+        if c.isdigit():
+            parts.append(f"cgroup {int(c) / 2**30:.1f}/" + (f"{int(m) / 2**30:.0f}" if m.isdigit() and int(m) < 2 ** 50 else "unlimited") + " GiB")
+            break
+    try:
+        parts.append(f"load {os.getloadavg()[0]:.1f}")
+    except (OSError, AttributeError):
+        pass
+    free = config.disk_free_gb()
+    if free is not None:
+        parts.append(f"disk free {free:.0f} GiB")
+    return " | ".join(parts) or "(no resource info available)"
+
+
+def push_log(why: str = "") -> bool:
+    """Upload the job log to the HF repo (never raises)."""
+    try:
+        from .storage import Store, backing_off
+        local, _, remote = os.environ.get("C44_PUSH_LOG", "").partition("|")
+        if not local or not remote or not Path(local).exists() or (backing_off() and why != "end"):
+            return False
+        ok, msg = Store().upload_file(local, remote, retries=1, max_wait=0)        # best effort: never wait for the Hub on behalf of a log
+        if not ok:
+            print(f"[log push] {msg}", flush=True)
+        return ok
+    except Exception as e:                                                # noqa: BLE001
+        print(f"[log push] failed: {e!r}", flush=True)
+        return False
+
+
+def monitor(stop, interval: float = 30.0, push_every: float = 600.0, now=time.time) -> None:
+    """Thread body: a resource line every `interval` s (so the log shows memory right up to a crash), a log push every `push_every` s."""
+    last_push = now()
+    while not stop.wait(interval):
+        print(f"[mon {time.strftime('%H:%M:%S')}] {resource_line()}", flush=True)
+        if now() - last_push >= push_every:
+            push_log()
+            last_push = now()
+
+
+def banner() -> str:
+    import platform
+    return "\n".join([f"[job] python {platform.python_version()} on {platform.platform()}, pid {os.getpid()}, cpus {os.cpu_count()}",
+                      f"[job] workers for features: C44_WEAK_WORKERS={os.environ.get('C44_WEAK_WORKERS', '6 (default)')}",
+                      f"[job] start: {resource_line()}"])
+
+
 def main(argv=None) -> int:
     import argparse
+    import signal
+    import threading
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=150)
     a = ap.parse_args(argv)
     write_state(pid=os.getpid(), state="running", n_scenes=a.n)
-    from . import molab
-    st = run_steps(molab.run)
-    write_state(upload=list(molab.LAST_UPLOAD))
-    print(f"\nJOB {st.get('state', '?').upper()}", flush=True)
-    return 0 if st.get("state") == "done" else 1
+    print(banner(), flush=True)
+
+    def on_signal(signum, _frame):                                        # a shutdown leaves a trace on the Hub
+        print(f"[job] received signal {signum} at {time.strftime('%H:%M:%S')} - {resource_line()}", flush=True)
+        write_state(state="ended", error=f"killed by signal {signum}")
+        push_log("signal")
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", signal.SIGTERM)):
+        try:
+            signal.signal(sig, on_signal)
+        except (ValueError, OSError):
+            pass
+    stop = threading.Event()
+    threading.Thread(target=monitor, args=(stop,), daemon=True).start()
+    try:
+        from . import molab
+        st = run_steps(molab.run)
+        write_state(upload=list(molab.LAST_UPLOAD))
+        print(f"\nJOB {st.get('state', '?').upper()}", flush=True)
+        return 0 if st.get("state") == "done" else 1
+    except BaseException as e:                                            # noqa: BLE001 - log it, then re-raise
+        print(f"[job] crashed: {e!r}", flush=True)
+        write_state(state="failed", error=f"job crashed: {e!r}")
+        raise
+    finally:
+        stop.set()
+        print(f"[job] end {time.strftime('%H:%M:%S')}: {resource_line()}", flush=True)
+        push_log("end")
 
 
 if __name__ == "__main__":

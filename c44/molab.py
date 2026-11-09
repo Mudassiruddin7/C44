@@ -238,9 +238,8 @@ def run(stage: str, n_scenes: int | None = None):
         return None
     if stage == "weak_analyse":
         import datetime
-        _need(["weak-analyse"])
+        _need(["weak-analyse"])                      # the CLI prints the report once; do not print it again here
         res = config.work_dir() / "results"
-        print((res / "weak" / "summary.md").read_text(encoding="utf-8"))
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
         zip_path = shutil.make_archive(str(Path.cwd() / "c44_weak_results"), "zip", res, base_dir="weak")
         # the feature tables are part of the result (they are what the analysis reads); add them to the zip next to the weak/ folder
@@ -260,9 +259,7 @@ def run(stage: str, n_scenes: int | None = None):
         print(f"results zip: {zip_path}")
         return zip_path
     if stage == "analyse":
-        _need(["analyse"])
-        res = config.work_dir() / "results"
-        print((res / "analysis" / "summary.md").read_text(encoding="utf-8"))
+        _need(["analyse"])                           # the CLI prints the report once; do not print it again here
         zip_path = shutil.make_archive(str(Path.cwd() / "c44_results"), "zip", config.work_dir(), base_dir="results")
         print(f"all results saved to {zip_path} (also pushed to the HF repo when one is set)")
         return zip_path

@@ -67,6 +67,14 @@ def test_features_plus_shares_the_flow_and_matches_clip_physics(render):
     assert all(np.isclose(a[k], b[k], equal_nan=True) for k in physics.ALL)
 
 
+@pytest.fixture(autouse=True)
+def _never_touch_the_real_hub(monkeypatch):
+    """c44/.env holds a real HF token: no test may fall back to it, whatever C44_HF_REPO says in the shell."""
+    from c44 import config as _config
+    monkeypatch.setattr(_config, "hf_repo", lambda: None)
+    monkeypatch.setattr(_config, "hf_token", lambda: None)
+
+
 @pytest.fixture
 def work(tmp_path, monkeypatch):
     monkeypatch.setenv("C44_WORK", str(tmp_path))
@@ -345,20 +353,229 @@ def test_job_stage_in_molab_returns_the_zip_and_reports_upload_status(work, monk
         molab.run("weak_job", n_scenes=6)
 
 
-def test_push_failures_are_retried_and_tolerated(work, monkeypatch):
+RATE_LIMIT = ("429 Too Many Requests for url: https://huggingface.co/api/datasets/x/y/commit/main. You have exceeded the rate limit for "
+              "repository commit creation (128 per hour). You can retry this action in about 1 hour.")
+
+
+class _Hub:
+    """A Store whose commits can be scripted: a list of outcomes (None = success, or an exception to raise)."""
+
+    @staticmethod
+    def make(outcomes):
+        from c44.storage import Store
+
+        class Scripted(Store):
+            def __init__(self):
+                super().__init__(repo_id="a/b", token="t")
+                self.calls, self.sent = 0, []
+
+            def flush(self, message="x"):
+                self.calls += 1
+                o = outcomes.pop(0) if outcomes else None
+                if o is not None:
+                    raise o
+                self.sent.append((message, [p for _, p in self._pending]))
+                self._pending.clear()
+                return 1
+        return Scripted()
+
+
+@pytest.fixture
+def hub_state(monkeypatch):
+    from c44 import storage
+    storage._reset_push_state()
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    yield storage
+    storage._reset_push_state()
+
+
+def test_retry_after_reads_the_hubs_wait(hub_state):
+    ra = hub_state.retry_after
+    assert ra(RuntimeError(RATE_LIMIT)) == 3600
+    assert ra(RuntimeError("429 Too Many Requests ... You can retry this action in 44 minutes.")) == 44 * 60
+    assert ra(RuntimeError("rate limit, retry in an hour")) == 3600
+    assert ra(RuntimeError("429 Too Many Requests")) == 600                 # no figure given: a default
+    assert ra(RuntimeError("connection reset by peer")) is None             # not a rate limit: the caller treats it as a network error
+
+    class WithHeader(Exception):
+        response = type("R", (), {"status_code": 429, "headers": {"Retry-After": "90"}})()
+    assert ra(WithHeader("x")) == 90
+
+
+def test_a_429_is_not_hammered_and_nothing_is_lost(work, hub_state):
+    from c44 import pipeline
+    s = _Hub.make([RuntimeError(RATE_LIMIT)])
+    (work / "a.csv").write_text("x\n", encoding="utf-8")
+    assert pipeline._flush(s, [work / "a.csv"], "m1") == "backoff"          # must not raise, and not retry 3 times
+    assert s.calls == 1 and s._pending                                      # the file is still queued
+    assert pipeline._flush(s, [work / "a.csv"], "m2") == "backoff" and s.calls == 1       # inside the pause: no request at all
+    assert hub_state.backing_off()
+    # the end of a stage waits out the (capped) pause and then gets through; everything staged goes out in that one commit
+    assert pipeline._flush(s, [work / "a.csv"], "end", force=True) == "pushed"
+    assert s.calls == 2 and s.sent[-1][0] == "end" and "a.csv" in s.sent[-1][1] and not s._pending
+    assert not hub_state.backing_off()
+
+
+def test_progress_pushes_are_spaced_out_and_capped_but_the_end_always_goes(work, hub_state):
+    from c44 import pipeline
+    s = _Hub.make([])
+    (work / "a.csv").write_text("x\n", encoding="utf-8")
+    assert pipeline._flush(s, [work / "a.csv"], "p1") == "pushed"
+    for i in range(30):                                                     # 30 progress pushes right after: all skipped, files stay queued
+        assert pipeline._flush(s, [work / "a.csv"], f"p{i + 2}") == "throttled"
+    assert s.calls == 1 and s._pending
+    assert pipeline._flush(s, [work / "a.csv"], "end", force=True) == "pushed" and s.calls == 2
+
+    storage = hub_state                                                     # the hourly budget
+    storage._PUSH["times"] = [storage.time.time() - 60] * storage.PUSH_PER_HOUR
+    storage._PUSH["last"] = 0.0
+    assert pipeline._flush(s, [work / "a.csv"], "q") == "throttled"
+    assert pipeline._flush(s, [work / "a.csv"], "end2", force=True) == "pushed"
+
+
+def test_a_network_error_gets_one_quick_retry_then_stays_queued(work, hub_state):
+    from c44 import pipeline
+    (work / "a.csv").write_text("x\n", encoding="utf-8")
+    s = _Hub.make([OSError("reset"), OSError("reset")])
+    assert pipeline._flush(s, [work / "a.csv"], "m") == "failed" and s.calls == 2 and s._pending
+    s2 = _Hub.make([OSError("reset")])
+    assert pipeline._flush(s2, [work / "a.csv"], "m", force=True) == "pushed" and s2.calls == 2
+
+
+def test_no_repo_means_local_only_and_never_raises(work, hub_state):
     from c44 import pipeline
     from c44.storage import Store
+    s = Store(repo_id=None, token=None)
+    (work / "a.csv").write_text("x\n", encoding="utf-8")
+    assert pipeline._flush(s, [work / "a.csv"], "m", force=True) == "nothing" and not s._pending
+    assert pipeline._flush(None, [], "m") == "nothing"
 
-    class Flaky(Store):
-        def __init__(self):
-            super().__init__(repo_id="a/b", token="t")
-            self.calls = 0
 
-        def flush(self, message="x"):
-            self.calls += 1
-            raise RuntimeError("429 rate limit")
+def test_upload_waits_out_a_rate_limit_instead_of_failing(work, hub_state, monkeypatch, tmp_path):
+    hf = pytest.importorskip("huggingface_hub")
+    from c44.storage import Store
+    f = tmp_path / "r.zip"
+    f.write_bytes(b"zip")
+    outcomes = [RuntimeError(RATE_LIMIT), None]
+    seen = []
 
-    monkeypatch.setattr("time.sleep", lambda s: None)
-    s = Flaky()
-    pipeline._flush(s, [], "msg")                                         # must not raise
-    assert s.calls == 3
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def create_repo(self, *a, **k):
+            pass
+
+        def upload_file(self, **k):
+            seen.append(k["path_in_repo"])
+            o = outcomes.pop(0)
+            if o is not None:
+                raise o
+
+        def list_repo_files(self, *a, **k):
+            return ["weak/r.zip"]
+
+    monkeypatch.setattr(hf, "HfApi", FakeApi)
+    ok, msg = Store(repo_id="a/b", token="t").upload_file(f, "weak/r.zip", retries=1)       # ONE attempt, yet the 429 does not use it up
+    assert ok and "uploaded" in msg and len(seen) == 2
+    outcomes[:] = [RuntimeError(RATE_LIMIT)]
+    ok, msg = Store(repo_id="a/b", token="t").upload_file(f, "weak/r.zip", retries=1, max_wait=0)     # a log push never waits
+    assert not ok and "429" in msg
+
+
+def test_watchdog_is_rearmed_by_progress_and_disk_free_ignores_fake_figures(monkeypatch):
+    import collections
+    import faulthandler
+    import shutil
+
+    from c44 import config, pipeline
+    calls = []
+    monkeypatch.setattr(faulthandler, "dump_traceback_later", lambda *a, **k: calls.append("arm"))
+    monkeypatch.setattr(faulthandler, "cancel_dump_traceback_later", lambda: calls.append("cancel"))
+    pipeline._WATCHDOG["on"] = False
+    pipeline.watchdog_ping()
+    assert calls == []                                                      # not armed (tests, library use): silent
+    try:
+        pipeline.arm_watchdog()
+        pipeline.watchdog_ping()
+        assert calls == ["arm", "cancel", "arm"]
+    finally:
+        pipeline._WATCHDOG["on"] = False
+    Usage = collections.namedtuple("Usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: Usage(2 ** 63, 0, 2 ** 63))      # molab's gVisor
+    assert config.disk_free_gb() is None and "disk free" not in pipeline._resources()
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: Usage(100 * 2 ** 30, 0, 40 * 2 ** 30))
+    assert config.disk_free_gb() == 40.0 and "disk free 40 GiB" in pipeline._resources()
+
+
+# ----------------------------------------------------------------------------- the job's own log on the Hub (so a crash leaves a trace)
+def test_flush_carries_the_job_log_in_the_same_commit(work, monkeypatch):
+    log = work / "weak_job.log"
+    log.write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("C44_PUSH_LOG", f"{log}|logs/weak_job_X.log")
+    staged = []
+
+    class Rec:
+        def stage(self, local, path_in_repo=None):
+            staged.append((str(local), path_in_repo))
+
+        def push(self, msg, force=False):
+            staged.append(("push", msg, force))
+            return "pushed"
+
+    pipeline._flush(Rec(), [], "m", force=True)
+    assert (str(log), "logs/weak_job_X.log") in staged and staged[-1] == ("push", "m", True)
+
+
+def test_monitor_writes_resource_lines_and_pushes_the_log(monkeypatch, capsys):
+    import threading
+    import time
+
+    from c44 import weak_job
+    pushed = []
+    monkeypatch.setattr(weak_job, "push_log", lambda why="": pushed.append(why) or True)
+    stop = threading.Event()
+    t = threading.Thread(target=weak_job.monitor, args=(stop, 0.05, 0.12), daemon=True)
+    t.start()
+    time.sleep(0.6)
+    stop.set()
+    t.join(2)
+    out = capsys.readouterr().out
+    assert out.count("[mon ") >= 3 and "RAM" in out and pushed
+
+
+def test_each_run_gets_its_own_remote_log_and_the_job_sees_it(work):
+    import sys
+
+    from c44 import weak_job
+    st = weak_job.start(6, cmd=[sys.executable, "-c", "import os; print('PUSHLOG=' + os.environ['C44_PUSH_LOG'])"])
+    assert st["remote_log"].startswith("logs/weak_job_") and st["remote_log"].endswith(".log")
+    lines = []
+    weak_job.follow(poll=0.3, out=lines.append)
+    assert "PUSHLOG=" in "\n".join(lines) and st["remote_log"] in "\n".join(lines)
+
+
+def test_main_pushes_the_log_at_the_end_and_on_a_crash(work, monkeypatch, capsys):
+    import signal
+
+    from c44 import molab, weak_job
+    saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    pushed = []
+    monkeypatch.setattr(weak_job, "push_log", lambda why="": pushed.append(why) or True)
+    try:
+        monkeypatch.setattr(molab, "run", lambda stage, **kw: "/z.zip" if stage == "weak_analyse" else None)
+        assert weak_job.main(["--n", "6"]) == 0 and pushed == ["end"]
+        assert weak_job.read_state()["state"] == "done"
+        pushed.clear()
+
+        def boom(stage, **kw):
+            raise KeyboardInterrupt()
+        monkeypatch.setattr(molab, "run", boom)
+        with pytest.raises(KeyboardInterrupt):
+            weak_job.main(["--n", "6"])
+        assert pushed == ["end"] and weak_job.read_state()["state"] == "failed"
+    finally:
+        for s, h in saved.items():
+            signal.signal(s, h)
+    out = capsys.readouterr().out
+    assert "[job] python" in out and "[job] end" in out and "[job] crashed" in out

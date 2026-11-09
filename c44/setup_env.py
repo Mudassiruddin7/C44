@@ -91,9 +91,9 @@ def report() -> dict:
     info["nvcc"] = f"{nvcc} ({ver[0]}.{ver[1]})" if nvcc else "not found"
     info["gcc"] = (subprocess.run(["gcc", "--version"], capture_output=True, text=True).stdout.splitlines() or ["?"])[0] \
         if shutil.which("gcc") else "not found"
-    du = shutil.disk_usage(config.work_dir())
     info["work_dir"] = str(config.work_dir())
-    info["disk_free_gb"] = round(du.free / 2**30, 1)
+    free = config.disk_free_gb()
+    info["disk_free_gb"] = round(free, 1) if free is not None else "not reported by this sandbox (no real limit shown)"
     try:
         info["ram_gb"] = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30, 1)
         info["cpus"] = os.cpu_count()

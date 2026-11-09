@@ -635,5 +635,5 @@ def run(store=None) -> str:
     if store is not None:
         for p in files:
             store.stage(p)
-        store.flush("c44: analysis")
+        store.push("c44: analysis", force=True)
     return summary

@@ -52,21 +52,40 @@ def _meta_of(c: Clip) -> Path:
     return p
 
 
-def _flush(store: Store | None, extra: list[Path] = (), msg: str = "c44") -> None:
+def _flush(store: Store | None, extra: list[Path] = (), msg: str = "c44", force: bool = False) -> str:
+    """Stage the files and push them to the Hub. Progress pushes (force=False) are rate-limited (see storage.PUSH_*) - a skipped one
+    keeps its files staged for the next - and the end of a stage passes force=True. Never raises."""
     if store is None:
-        return
+        return "nothing"
     for p in [config.work_dir() / "manifest.jsonl", *extra]:
         if Path(p).exists():
             store.stage(p)
-    import time
-    for attempt in range(1, 4):
-        try:
-            store.flush(msg)
-            return
-        except Exception as e:                                            # noqa: BLE001 - hours of CPU work must not die on a Hub hiccup
-            print(f"[push] HF commit failed (attempt {attempt}/3): {e!r}", flush=True)
-            time.sleep(5 * attempt)
-    print("[push] giving up for now: the files stay queued and go out with the next push; they are safe on local disk", flush=True)
+    import os
+    pl = os.environ.get("C44_PUSH_LOG", "")                              # "<local file>|<path in repo>": the detached job's log, so a crash leaves a trace
+    if "|" in pl and Path(pl.split("|", 1)[0]).exists():
+        store.stage(Path(pl.split("|", 1)[0]), pl.split("|", 1)[1])
+    return store.push(msg, force=force)
+
+
+_WATCHDOG = {"on": False}
+WATCHDOG_S = 900
+
+
+def arm_watchdog() -> None:
+    """Dump every thread's stack when a stage makes no progress for 15 min (re-armed by watchdog_ping on every result)."""
+    import faulthandler
+    import sys
+    _WATCHDOG["on"] = True
+    faulthandler.dump_traceback_later(WATCHDOG_S, repeat=True, file=sys.stderr)
+
+
+def watchdog_ping() -> None:
+    """Progress was made: restart the stall timer, so a healthy stage never prints 'Timeout (0:15:00)!'."""
+    if _WATCHDOG["on"]:
+        import faulthandler
+        import sys
+        faulthandler.cancel_dump_traceback_later()
+        faulthandler.dump_traceback_later(WATCHDOG_S, repeat=True, file=sys.stderr)
 
 
 def _finished(cell: str, key: str = "scene") -> set[str]:
@@ -145,7 +164,7 @@ def build_rc(n: int, seed: int = 0, store: Store | None = None, log: Log = print
                 Path(vpath).unlink()
         if made and len(made) % batch == 0:
             _flush(store, msg=f"c44: RC x{len(made)}")
-    _flush(store, msg="c44: RC")
+    _flush(store, msg="c44: RC", force=True)
     return made
 
 
@@ -164,7 +183,7 @@ def build_captions(vlm=None, model_id: str = "Qwen/Qwen2.5-VL-7B-Instruct", stor
         caps[rc.clip_id] = vlm.caption(first)
         path.write_text(json.dumps(caps, indent=1))
         log(f"[caption] {rc.clip_id}: {caps[rc.clip_id][:80]}")
-    _flush(store, [path], "c44: captions")
+    _flush(store, [path], "c44: captions", force=True)
     return caps
 
 
@@ -281,7 +300,7 @@ def build_gr(fw, seed: int = 0, store: Store | None = None, log: Log = print, ge
             _fail(cell, cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
         if made and len(made) % batch == 0:
             _flush(store, msg=f"c44: {cell} x{len(made)}")
-    _flush(store, msg=f"c44: {cell}")
+    _flush(store, msg=f"c44: {cell}", force=True)
     return made
 
 
@@ -347,7 +366,7 @@ def build_rr(seed: int = 0, store: Store | None = None, log: Log = print, geo=No
                 shutil.rmtree(config.work_dir() / "downloads" / "3DGS", ignore_errors=True)
         if made and len(made) % batch == 0:
             _flush(store, msg=f"c44: {cell} x{len(made)}")
-    _flush(store, msg=f"c44: {cell}")
+    _flush(store, msg=f"c44: {cell}", force=True)
     return made
 
 
@@ -375,7 +394,7 @@ def build_gv(gen, seed: int = 0, store: Store | None = None, log: Log = print, g
             _fail("GV", cid, rc.scene, "error", parent=rc.clip_id, error=f"{e!r} @ {_where(e)}")
         if made and len(made) % batch == 0:
             _flush(store, msg=f"c44: GV x{len(made)}")
-    _flush(store, msg="c44: GV")
+    _flush(store, msg="c44: GV", force=True)
     return made
 
 
@@ -416,7 +435,7 @@ def run_detectors(names=("univfd", "npr", "consistency"), cells=CELLS, store: St
         del det
         _release_gpu()
         log(f"[{name}] scored {len(rows)} new clips")
-    _flush(store, [out], "c44: detector scores")
+    _flush(store, [out], "c44: detector scores", force=True)
     return df
 
 
@@ -480,7 +499,7 @@ def run_cps(n_folds: int = 5, seed: int = 0, store: Store | None = None, log: Lo
     allsc = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=out.columns)
     allsc = pd.concat([allsc[allsc.detector != "cps"], out], ignore_index=True)
     allsc.to_csv(path, index=False)
-    _flush(store, [path, results_dir() / "cps_features.csv"], "c44: CPS")
+    _flush(store, [path, results_dir() / "cps_features.csv"], "c44: CPS", force=True)
     log(f"[cps] scored {len(out)} clips out-of-fold")
     return out
 
@@ -700,7 +719,7 @@ def build_variants(kind: str, cells=("RC", "RR", "GR"), store: Store | None = No
                 res = run_pool(_variant_worker, part, n, log=log, label=f"variants {kind} {i + len(part)}/{len(jobs)}")
             record(res)
     else:
-        _flush(store, msg=f"c44: variants {kind}")
+        _flush(store, msg=f"c44: variants {kind}", force=True)
     log(f"[variants] {kind}: {len(made)} clips")
     return made
 
@@ -715,7 +734,6 @@ def _default_workers() -> int:
 def _resources() -> str:
     """One-line RAM / disk / load snapshot for the progress lines (best effort)."""
     import os
-    import shutil as sh
     out = []
     try:
         import psutil
@@ -731,8 +749,10 @@ def _resources() -> str:
                 break
         except Exception:                                              # noqa: BLE001
             pass
+    free = config.disk_free_gb()
+    if free is not None:
+        out.append(f"disk free {free:.0f} GiB")
     try:
-        out.append(f"disk free {sh.disk_usage(config.work_dir()).free / 2**30:.0f} GiB")
         out.append(f"load {os.getloadavg()[0]:.0f}")
     except Exception:                                                  # noqa: BLE001
         pass
@@ -782,6 +802,7 @@ def run_pool(fn, jobs, n: int, log: Log = print, label: str = "pool", every: int
                         raise                                           # -> the hung-pool fallback below
                     log(f"[{label}] still working: {len(done)}/{len(jobs)} done, {idle:.0f} s since the last result  [{_resources()}]")
             done[i] = r
+            watchdog_ping()
             if on_result:
                 on_result(r)
             note()
@@ -803,6 +824,7 @@ def run_pool(fn, jobs, n: int, log: Log = print, label: str = "pool", every: int
             for f in fin:
                 i = pend.pop(f)
                 done[i] = f.result()
+                watchdog_ping()
                 if on_result:
                     on_result(done[i])
                 note()
@@ -854,7 +876,7 @@ def physics_features(store: Store | None = None, log: Log = print, n_jobs: int |
         run_pool(_phys_worker, jobs, n_jobs or min(_default_workers(), 8), log=log, label="physics", every=50, on_result=keep)
         df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
         df.to_csv(out, index=False)
-    _flush(store, [out], "c44: physics features")
+    _flush(store, [out], "c44: physics features", force=True)
     return df
 
 
